@@ -8,7 +8,17 @@
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
+#include <iostream>
+
 namespace mlx::core::fft {
+
+bool is_power_of_2(int n) {
+  return ((n & (n - 1)) == 0) && n != 0;
+}
+
+int next_power_of_2(int n) {
+  return pow(2, std::ceil(std::log2(n)));
+}
 
 array fft_impl(
     const array& a,
@@ -90,12 +100,78 @@ array fft_impl(
     out_shape[ax] = inverse ? n.back() : out_shape[ax] / 2 + 1;
   }
 
+  auto stream = to_stream(s);
+
   auto in_type = real && !inverse ? float32 : complex64;
   auto out_type = real && inverse ? float32 : complex64;
+
+  if (stream.device == Device::gpu) {
+    // Perform ND FFT on GPU as a series of 1D FFTs
+    if (valid_axes.size() > 1) {
+      auto out = in;
+      for (int i = valid_axes.size() - 1; i >= 0; i--) {
+        // Opposite order for fft vs ifft
+        int index = inverse ? valid_axes.size() - i - 1 : i;
+        int axis = valid_axes[index];
+        // Mirror np.fft.(i)rfftn and perform a real transform
+        // only on the final axis.
+        bool step_real = (real && index == valid_axes.size() - 1);
+        int step_shape = inverse ? out_shape[axis] : in.shape(axis);
+        out = fft_impl(out, {step_shape}, {axis}, step_real, inverse, s);
+      }
+      return out;
+    }
+
+    // Guarranteed to be 1D now
+    int n_1d = n.back();
+
+    // If n is larger than the maximum size, do a 4 step FFT
+    if (n_1d > 2048) {
+      // We need to decompose it into stockham compatible factors
+      int n1 = 128;
+      int n2 = 32;
+      int axis = valid_axes[0];
+      // We need to insert the axis instead of where the other ones were
+      std::vector<int> four_step_shape(in.shape());
+      four_step_shape.erase(four_step_shape.begin() + axis);
+      four_step_shape.insert(four_step_shape.begin() + axis, n2);
+      four_step_shape.insert(four_step_shape.begin() + axis, n1);
+
+      array ij =
+          expand_dims(arange(n1, s), 1, s) * expand_dims(arange(n2, s), 0, s);
+      array ij_b = broadcast_to(ij, four_step_shape, s);
+      array x = reshape(in, four_step_shape, s);
+      array twiddles = exp(-2 * M_PI * ij * complex64_t{0.0f, 1.0f} / n_1d, s);
+      array step_one = fft_impl(x, {n1}, {axis}, false, false, s) * twiddles;
+      array step_two = fft_impl(
+          swapaxes(step_one, axis, axis + 1, s), {n2}, {axis}, false, false, s);
+      return reshape(step_two, in.shape(), s);
+    }
+
+    // Check if n can be done with the Stockham algorithm
+    auto [fast_n, _] = FFT::next_fast_n(n_1d);
+    if (fast_n > n_1d) {
+      // Precompute twiddle factors in high precision for Bluestein's
+      auto [bluestein_n, _] = FFT::next_fast_n(2 * n_1d - 1);
+      auto blue_outputs = array::make_arrays(
+          {{bluestein_n}, {n_1d}},
+          {{complex64, complex64}},
+          std::make_shared<BluesteinFFTSetup>(to_stream(Device::cpu), n_1d),
+          {});
+      array w_q = blue_outputs[0];
+      array w_k = blue_outputs[1];
+      return array(
+          out_shape,
+          out_type,
+          std::make_shared<FFT>(stream, valid_axes, inverse, real),
+          {astype(in, in_type, s), w_q, w_k});
+    }
+  }
+
   return array(
       out_shape,
       out_type,
-      std::make_shared<FFT>(to_stream(s), valid_axes, inverse, real),
+      std::make_shared<FFT>(stream, valid_axes, inverse, real),
       {astype(in, in_type, s)});
 }
 

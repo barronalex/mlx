@@ -235,7 +235,6 @@ class ArcCos : public UnaryPrimitive {
 
   void eval_cpu(const std::vector<array>& inputs, array& out) override;
   void eval_gpu(const std::vector<array>& inputs, array& out) override;
-
   DEFINE_VMAP()
   DEFINE_GRADS()
   DEFINE_PRINT(ArcCos)
@@ -441,6 +440,24 @@ class AsStrided : public UnaryPrimitive {
   size_t offset_;
 
   void eval(const std::vector<array>& inputs, array& out);
+};
+
+// TODO: replace with native operations once we have CPU float64 support
+class BluesteinFFTSetup : public Primitive {
+ public:
+  explicit BluesteinFFTSetup(Stream stream, int n) : Primitive(stream), n_(n){};
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_PRINT(BluesteinFFTSetup)
+
+ private:
+  int n_;
+
+  void eval(const std::vector<array>& inputs, std::vector<array>& outputs);
 };
 
 class Broadcast : public UnaryPrimitive {
@@ -855,10 +872,18 @@ class FFT : public UnaryPrimitive {
 
   bool is_equivalent(const Primitive& other) const override;
 
+  // GPU FFT planning
+  static std::pair<int, std::vector<int>> next_fast_n(int n);
+  static std::vector<int> plan_stockham_fft(int n);
+
  private:
   std::vector<size_t> axes_;
   bool inverse_;
   bool real_;
+
+  // Ordered by preference in decomposition. Typically largest->smallest is
+  // best.
+  const std::vector<int> gpu_radices_;
 
   void eval(const std::vector<array>& inputs, array& out);
 };
