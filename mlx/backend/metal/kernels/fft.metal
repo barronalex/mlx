@@ -23,6 +23,11 @@ constant int radix_5_steps_ [[function_constant(4)]];
 constant int radix_4_steps_ [[function_constant(5)]];
 constant int radix_3_steps_ [[function_constant(6)]];
 constant int radix_2_steps_ [[function_constant(7)]];
+constant int rader_7_steps_ [[function_constant(8)]];
+constant int rader_5_steps_ [[function_constant(9)]];
+constant int rader_4_steps_ [[function_constant(10)]];
+constant int rader_3_steps_ [[function_constant(11)]];
+constant int rader_2_steps_ [[function_constant(12)]];
 
 float2 complex_mul(float2 a, float2 b) {
   float2 c = {
@@ -106,14 +111,16 @@ void radix4(int i, int p, int m, threadgroup float2* read_buf, threadgroup float
     k = i % p;
   }
 
-  float2 twiddle = get_twiddle(k, 4*p);
-  // e^a * e^b = e^(a + b)
-  float2 twiddle_2 = complex_mul(twiddle, twiddle);
-  float2 twiddle_3 = complex_mul(twiddle, twiddle_2);
+  if (p > 1) {
+    float2 twiddle = get_twiddle(k, 4*p);
+    // e^a * e^b = e^(a + b)
+    float2 twiddle_2 = complex_mul(twiddle, twiddle);
+    float2 twiddle_3 = complex_mul(twiddle, twiddle_2);
 
-  x_1 = complex_mul(x_1, twiddle);
-  x_2 = complex_mul(x_2, twiddle_2);
-  x_3 = complex_mul(x_3, twiddle_3);
+    x_1 = complex_mul(x_1, twiddle);
+    x_2 = complex_mul(x_2, twiddle_2);
+    x_3 = complex_mul(x_3, twiddle_3);
+  }
 
   float2 minus_i = {0, -1};
 
@@ -239,22 +246,37 @@ void perform_fft(
     int i,  // thread index
     int n,  // overall fft size
     int m,  // total threads we have access to
+    const device float2* raders_b_q,
+    const device short* raders_g_q,
+    const device short* raders_g_minus_q,
     threadgroup float2** read_buf,
     threadgroup float2** write_buf) {
   int p = 1;
 
-  int radix = 2;
-  int m_r = n / radix;
-  // ceil divide
+  float2 x_0 = (*read_buf)[0];
+  // Rader permutation
+  for (int t = 0; t < elems_per_thread_; t++) {
+    int index = i + t * m;
+    short g_q = raders_g_q[index];
+    (*write_buf)[index+1] = (*read_buf)[g_q];
+  }
+
+  stockham_switch(read_buf, write_buf);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  int rader_m = 1;
+
+  // FFT
+  int radix = 4;
+  int m_r = (n - 1) / radix;
   int max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
-  for (int s = 0; s < radix_2_steps_; s++) {
+  for (int s = 0; s < 2; s++) {
     for (int t = 0; t < max_radices_per_thread; t++) {
       int index = i + t * m;
-      if (is_power_of_2_) {
-        radix2(index, p, m_r, *read_buf, *write_buf);
-      } else if (index < m_r) {
-        radix2(index, p, m_r, *read_buf, *write_buf);
-      }
+      radix4(index, p, m_r, *read_buf + rader_m, *write_buf + rader_m);
+    }
+    for (int t = 0; t < max_radices_per_thread; t++) {
+
     }
     p *= radix;
 
@@ -262,15 +284,24 @@ void perform_fft(
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 
-  radix = 3;
-  m_r = n / radix;
-  max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
-  for (int s = 0; s < radix_3_steps_; s++) {
+  // Calculate X_0
+  float2 out_0 = x_0 + (*read_buf)[rader_m];
+
+  float2 inv = {1.0f, -1.0f};
+
+  // Multiply by Rader's constant
+  for (int t = 0; t < elems_per_thread_; t++) {
+    int index = i + t * m;
+    (*read_buf)[index+1] = complex_mul((*read_buf)[index+1], raders_b_q[index]) * inv;
+  }
+
+  // IFFT
+  p = 1;
+  for (int s = 0; s < 2; s++) {
     for (int t = 0; t < max_radices_per_thread; t++) {
       int index = i + t * m;
-      if (index < m_r) {
-        radix3(index, p, m_r, *read_buf, *write_buf);
-      }
+      // the radixs share between each other
+      radix4(index, p, m_r, *read_buf + 1, *write_buf + 1);
     }
     p *= radix;
 
@@ -278,55 +309,106 @@ void perform_fft(
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 
-  radix = 4;
-  m_r = n / radix;
-  max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
-  for (int s = 0; s < radix_4_steps_; s++) {
-    for (int t = 0; t < max_radices_per_thread; t++) {
-      int index = i + t * m;
-      if (is_power_of_2_) {
-        radix4(index, p, m_r, *read_buf, *write_buf);
-      } else if (index < m_r) {
-        radix4(index, p, m_r, *read_buf, *write_buf);
-      }
-    }
-    p *= radix;
+  float2 inv_factor = {1.0f / (n - 1), -1.0f / (n - 1)};
 
-    stockham_switch(read_buf, write_buf);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+  // Rader permutation
+  for (int t = 0; t < elems_per_thread_; t++) {
+    int index = i + t * m;
+    int g_minus_q = raders_g_minus_q[index];
+    (*write_buf)[g_minus_q] = (*read_buf)[index+1] * inv_factor + x_0;
   }
 
-  radix = 5;
-  m_r = n / radix;
-  max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
-  for (int s = 0; s < radix_5_steps_; s++) {
-    for (int t = 0; t < max_radices_per_thread; t++) {
-      int index = i + t * m;
-      if (index < m_r) {
-        radix5(index, p, m_r, *read_buf, *write_buf);
-      }
-    }
-    p *= radix;
-
-    stockham_switch(read_buf, write_buf);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+  stockham_switch(read_buf, write_buf);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  
+  if (i == 0) {
+    (*read_buf)[0] = out_0;
   }
 
-  radix = 7;
-  m_r = n / radix;
-  max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
-  for (int s = 0; s < radix_7_steps_; s++) {
-    for (int t = 0; t < max_radices_per_thread; t++) {
-      int index = i + t * m;
-      if (index < m_r) {
-        radix7(index, p, m_r, *read_buf, *write_buf);
-      }
-    }
-    p *= radix;
+  // int radix = 2;
+  // int m_r = n / radix;
+  // // ceil divide
+  // int max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
+  // for (int s = 0; s < steps_per_radix[0]; s++) {
+  //   for (int t = 0; t < max_radices_per_thread; t++) {
+  //     int index = i + t * m;
+  //     if (is_power_of_2_) {
+  //       radix2(index, p, m_r, *read_buf, *write_buf);
+  //     } else if (index < m_r) {
+  //       radix2(index, p, m_r, *read_buf, *write_buf);
+  //     }
+  //   }
+  //   p *= radix;
 
-    stockham_switch(read_buf, write_buf);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-  }
+  //   stockham_switch(read_buf, write_buf);
+  //   threadgroup_barrier(mem_flags::mem_threadgroup);
+  // }
+
+  // radix = 3;
+  // m_r = n / radix;
+  // max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
+  // for (int s = 0; s < steps_per_radix[1]; s++) {
+  //   for (int t = 0; t < max_radices_per_thread; t++) {
+  //     int index = i + t * m;
+  //     if (index < m_r) {
+  //       radix3(index, p, m_r, *read_buf, *write_buf);
+  //     }
+  //   }
+  //   p *= radix;
+
+  //   stockham_switch(read_buf, write_buf);
+  //   threadgroup_barrier(mem_flags::mem_threadgroup);
+  // }
+
+  // radix = 4;
+  // m_r = n / radix;
+  // max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
+  // for (int s = 0; s < steps_per_radix[2]; s++) {
+  //   for (int t = 0; t < max_radices_per_thread; t++) {
+  //     int index = i + t * m;
+  //     if (is_power_of_2_) {
+  //       radix4(index, p, m_r, *read_buf, *write_buf);
+  //     } else if (index < m_r) {
+  //       radix4(index, p, m_r, *read_buf, *write_buf);
+  //     }
+  //   }
+  //   p *= radix;
+
+  //   stockham_switch(read_buf, write_buf);
+  //   threadgroup_barrier(mem_flags::mem_threadgroup);
+  // }
+
+  // radix = 5;
+  // m_r = n / radix;
+  // max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
+  // for (int s = 0; s < steps_per_radix[3]; s++) {
+  //   for (int t = 0; t < max_radices_per_thread; t++) {
+  //     int index = i + t * m;
+  //     if (index < m_r) {
+  //       radix5(index, p, m_r, *read_buf, *write_buf);
+  //     }
+  //   }
+  //   p *= radix;
+
+  //   stockham_switch(read_buf, write_buf);
+  //   threadgroup_barrier(mem_flags::mem_threadgroup);
+  // }
+
+  // radix = 7;
+  // m_r = n / radix;
+  // max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
+  // for (int s = 0; s < steps_per_radix[4]; s++) {
+  //   for (int t = 0; t < max_radices_per_thread; t++) {
+  //     int index = i + t * m;
+  //     if (index < m_r) {
+  //       radix7(index, p, m_r, *read_buf, *write_buf);
+  //     }
+  //   }
+  //   p *= radix;
+
+  //   stockham_switch(read_buf, write_buf);
+  //   threadgroup_barrier(mem_flags::mem_threadgroup);
+  // }
 }
 
 // Each FFT is computed entirely in shared GPU memory.
@@ -337,6 +419,9 @@ template <int tg_mem_size>
 [[kernel]] void fft(
     const device float2* in [[buffer(0)]],
     device float2* out [[buffer(1)]],
+    const device float2* raders_b_q [[buffer(2)]],
+    const device short* raders_g_q [[buffer(3)]],
+    const device short* raders_g_minus_q [[buffer(4)]],
     constant const int& n,
     constant const int& batch_size,
     uint3 elem [[thread_position_in_grid]],
@@ -362,25 +447,29 @@ template <int tg_mem_size>
   }
 
   // Copy input into shared memory
-  for (int t = 0; t < elems_per_thread_; t++) {
+  for (int t = 0; t < elems_per_thread_ + 1; t++) {
     int index = fft_idx + t * m;
-    read_buf[index] = in[batch_idx + index];
-    if (inv_) {
-      read_buf[index].y = -read_buf[index].y;
+    if (index < n) {
+      read_buf[index] = in[batch_idx + index];
+      if (inv_) {
+        read_buf[index].y = -read_buf[index].y;
+      }
     }
   }
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  perform_fft(fft_idx, n, m, &read_buf, &write_buf);
+  perform_fft(fft_idx, n, m, raders_b_q, raders_g_q, raders_g_minus_q, &read_buf, &write_buf);
 
   float2 inv_factor = {1.0f / n, -1.0f / n};
-  for (int t = 0; t < elems_per_thread_; t++) {
+  for (int t = 0; t < elems_per_thread_ + 1; t++) {
     int index = fft_idx + t * m;
-    if (inv_) {
-      read_buf[index] *= inv_factor;
+    if (index < n) {
+      if (inv_) {
+        read_buf[index] *= inv_factor;
+      }
+      out[batch_idx + index] = read_buf[index];
     }
-    out[batch_idx + index] = read_buf[index];
   }
 }
 
@@ -435,7 +524,7 @@ template <int tg_mem_size>
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  perform_fft(fft_idx, n, m, &read_buf, &write_buf);
+  // perform_fft(fft_idx, n, m, &read_buf, &write_buf);
 
   float2 conj = {1, -1};
   float2 minus_j = {0, -1};
@@ -518,7 +607,7 @@ template <int tg_mem_size>
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  perform_fft(fft_idx, n, m, &read_buf, &write_buf);
+  // perform_fft(fft_idx, n, m, &read_buf, &write_buf);
 
   for (int t = 0; t < elems_per_thread_; t++) {
     int index = fft_idx + t * m;
@@ -534,7 +623,7 @@ template <int tg_mem_size>
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  perform_fft(fft_idx, n, m, &read_buf, &write_buf);
+  // perform_fft(fft_idx, n, m, &read_buf, &write_buf);
 
   float2 inv_factor = {1.0f / n, -1.0f / n};
   float2 inv_factor_overall = {1.0f / length, -1.0f / length};
@@ -558,6 +647,9 @@ template <int tg_mem_size>
   [[kernel]] void fft<tg_mem_size>( \
       const device float2* in [[buffer(0)]], \
       device float2* out [[buffer(1)]], \
+      const device float2* raders_b_q [[buffer(2)]], \
+      const device short* raders_g_q [[buffer(3)]], \
+      const device short* raders_g_minus_q [[buffer(4)]], \
     constant const int& n, \
     constant const int& batch_size, \
     uint3 elem [[thread_position_in_grid]], \

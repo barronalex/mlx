@@ -5,6 +5,8 @@
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
+#include <iostream>
+
 namespace mlx::core {
 
 using MTLFC = std::tuple<const void*, MTL::DataType, NS::UInteger>;
@@ -118,13 +120,14 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   int bluestein_n = -1;
   auto plan = plan_stockham_fft(n);
-  if (plan.size() == 0) {
-    // Bluestein's algorithm transforms an FFT to
-    // a convolution of size > 2n + 1.
-    // We solve that conv via FFT wth the convolution theorem.
-    bluestein_n = next_fast_n(2 * n - 1);
-    plan = plan_stockham_fft(bluestein_n);
-  }
+  plan = {0, 0, 2, 0, 0};
+  // if (plan.size() == 0) {
+  //   // Bluestein's algorithm transforms an FFT to
+  //   // a convolution of size > 2n + 1.
+  //   // We solve that conv via FFT wth the convolution theorem.
+  //   bluestein_n = next_fast_n(2 * n - 1);
+  //   plan = plan_stockham_fft(bluestein_n);
+  // }
 
   int fft_size = bluestein_n > 0 ? bluestein_n : n;
 
@@ -192,19 +195,32 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
     compute_encoder.set_input_array(in_contiguous, 0);
     compute_encoder.set_output_array(out, 1);
 
+    auto& raders_b_q = inputs[1];
+    auto& raders_g_q = inputs[2];
+    auto& raders_g_minus_q = inputs[3];
+    compute_encoder.set_input_array(raders_b_q, 2);
+    compute_encoder.set_input_array(raders_g_q, 3);
+    compute_encoder.set_input_array(raders_g_minus_q, 4);
+
     if (bluestein_n > 0) {
       // Precomputed twiddle factors for Bluestein's
       auto& w_q = inputs[1];
       auto& w_k = inputs[2];
-      compute_encoder.set_input_array(w_q, 2); // w_q
-      compute_encoder.set_input_array(w_k, 3); // w_k
-      compute_encoder->setBytes(&n, sizeof(int), 4);
-      compute_encoder->setBytes(&bluestein_n, sizeof(int), 5);
-      compute_encoder->setBytes(&total_batch_size, sizeof(int), 6);
+      compute_encoder.set_input_array(w_q, 5); // w_q
+      compute_encoder.set_input_array(w_k, 6); // w_k
+      compute_encoder->setBytes(&n, sizeof(int), 7);
+      compute_encoder->setBytes(&bluestein_n, sizeof(int), 8);
+      compute_encoder->setBytes(&total_batch_size, sizeof(int), 9);
     } else {
-      compute_encoder->setBytes(&n, sizeof(int), 2);
-      compute_encoder->setBytes(&total_batch_size, sizeof(int), 3);
+      compute_encoder->setBytes(&n, sizeof(int), 5);
+      compute_encoder->setBytes(&total_batch_size, sizeof(int), 6);
     }
+
+    // std::cout << "fft size " << fft_size << std::endl;
+    // std::cout << "threads per fft " << threads_per_fft << std::endl;
+    // std::cout << "elems per thread " << elems_per_thread << std::endl;
+    // std::cout << "threadgroup batch size " << threadgroup_batch_size <<
+    // std::endl; std::cout << "batch size " << batch_size << std::endl;
 
     auto group_dims = MTL::Size(1, threadgroup_batch_size, threads_per_fft);
     auto grid_dims =

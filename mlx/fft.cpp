@@ -8,6 +8,8 @@
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
+#include <iostream>
+
 #define MAX_STOCKHAM_FFT_SIZE 2048
 #define MAX_BLUESTEIN_FFT_SIZE 1024
 
@@ -38,6 +40,8 @@ array four_step_fft(
     int axis,
     bool inverse,
     StreamOrDevice s);
+
+std::tuple<array, array, array> compute_raders_constants(int n);
 
 array fft_impl(
     const array& a,
@@ -153,27 +157,35 @@ array fft_impl(
       return gpu_irfft(a, n_1d, axis, s);
     }
 
-    // Check if n can be done with the Stockham algorithm
-    auto plan = FFT::plan_stockham_fft(n_1d);
-    if (plan.size() == 0 || n_1d > MAX_STOCKHAM_FFT_SIZE) {
-      array in_complex = astype(in, complex64, s);
-      array out = in;
-      // If n is larger than the maximum size, do a 4 step FFT
-      if (n_1d > MAX_BLUESTEIN_FFT_SIZE) {
-        out = four_step_fft(in_complex, n_1d, axis, inverse, s);
-      } else {
-        out = bluestein_fft(in_complex, n_1d, axis, inverse, s);
-      }
+    // Now calculate the raders constant
+    auto [b_q, g_q, g_minus_q] = compute_raders_constants(n_1d);
+    return array(
+        out_shape,
+        out_type,
+        std::make_shared<FFT>(stream, valid_axes, inverse, real),
+        {astype(in, in_type, s), b_q, g_q, g_minus_q});
 
-      if (in_type == float32) {
-        // RFFT
-        std::vector<int> starts(in.ndim(), 0);
-        std::vector<int> ends(in.shape());
-        ends[axis] = n_1d / 2 + 1;
-        out = slice(out, starts, ends, s);
-      }
-      return out;
-    }
+    // Check if n can be done with the Stockham algorithm
+    // auto plan = FFT::plan_stockham_fft(n_1d);
+    // if (plan.size() == 0 || n_1d > MAX_STOCKHAM_FFT_SIZE) {
+    //   array in_complex = astype(in, complex64, s);
+    //   array out = in;
+    //   // If n is larger than the maximum size, do a 4 step FFT
+    //   if (n_1d > MAX_BLUESTEIN_FFT_SIZE) {
+    //     out = four_step_fft(in_complex, n_1d, axis, inverse, s);
+    //   } else {
+    //     out = bluestein_fft(in_complex, n_1d, axis, inverse, s);
+    //   }
+
+    //   if (in_type == float32) {
+    //     // RFFT
+    //     std::vector<int> starts(in.ndim(), 0);
+    //     std::vector<int> ends(in.shape());
+    //     ends[axis] = n_1d / 2 + 1;
+    //     out = slice(out, starts, ends, s);
+    //   }
+    //   return out;
+    // }
   }
 
   return array(
@@ -462,6 +474,58 @@ array four_step_fft(
   array out = reshape(step_two, a.shape(), s);
   out = inverse ? conjugate(out) / n : out;
   return out;
+}
+
+int mod_exp(int x, int y, int n) {
+  int out = 1;
+  while (y) {
+    if (y & 1) {
+      out = out * x % n;
+    }
+    y >>= 1;
+    x = x * x % n;
+  }
+  return out;
+}
+
+int primitive_root(int n) {
+  // Get all the prime factors of n
+  auto factors = prime_factors(n - 1);
+
+  for (int r = 2; r < n - 1; r++) {
+    bool found = true;
+    for (int factor : factors) {
+      if (mod_exp(r, (n - 1) / factor, n) == 1) {
+        found = false;
+        break;
+      }
+    }
+    if (found) {
+      return r;
+    }
+  }
+  return -1;
+}
+
+std::tuple<array, array, array> compute_raders_constants(int n) {
+  // Calculate primitive root
+  int proot = primitive_root(n);
+  // Fermat's little theorem
+  int inv = mod_exp(proot, n - 2, n);
+  // Now get the g_minus_q sequence
+  std::vector<short> g_q(n - 1);
+  std::vector<short> g_minus_q(n - 1);
+  for (int i = 0; i < n - 1; i++) {
+    g_q[i] = mod_exp(proot, i, n);
+    g_minus_q[i] = mod_exp(inv, i, n);
+  }
+  array g_q_arr(g_q.begin(), {n - 1});
+  array g_minus_q_arr(g_minus_q.begin(), {n - 1});
+  array b_q =
+      exp(complex64_t{0.0f, 2.0f} * astype(g_minus_q_arr, float32) / n * -M_PI);
+  array b_q_fft = fft_impl(
+      b_q, {n - 1}, {0}, /* real= */ false, /* inverse= */ false, Device::cpu);
+  return std::make_tuple(b_q_fft, g_q_arr, g_minus_q_arr);
 }
 
 } // namespace mlx::core::fft

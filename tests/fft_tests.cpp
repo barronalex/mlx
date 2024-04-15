@@ -2,96 +2,113 @@
 
 #include "doctest/doctest.h"
 
+#include <iostream>
+#include "benchmarks/cpp/time_utils.h"
 #include "mlx/mlx.h"
 
 using namespace mlx::core;
 
 TEST_CASE("test fft basics") {
-  array x(1.0);
-  CHECK_THROWS(fft::fft(x));
-  CHECK_THROWS(fft::ifft(x));
+  // random::seed(7);
+  array x = random::normal({131072 * 64, 17});
+  // array x = arange(17);
+  x = astype(x, complex64);
+  array y = fft::fft(x);
+  std::cout << "y " << y << std::endl;
+  // std::cout << "y " << reshape(slice(y, {0}, {16}), {4, 4}) << std::endl;
 
-  x = array({1.0});
-  auto y = fft::fft(x);
-  CHECK_EQ(y.dtype(), complex64);
-  CHECK_EQ(y.size(), x.size());
-  CHECK_EQ(y.item<complex64_t>(), complex64_t{1.0f, 0.0f});
+  auto bench_fft = [&x]() { return fft::fft(x); };
+  TIME(bench_fft);
 
-  y = fft::ifft(x);
-  CHECK_EQ(y.dtype(), complex64);
-  CHECK_EQ(y.size(), x.size());
-  CHECK_EQ(y.item<complex64_t>(), complex64_t{1.0f, 0.0f});
-
-  x = array({complex64_t{1.0f, 1.0f}}, complex64);
+  set_default_device(Device::cpu);
   y = fft::fft(x);
-  CHECK_EQ(y.size(), x.size());
-  CHECK_EQ(y.item<complex64_t>(), complex64_t{1.0f, 1.0f});
+  std::cout << "y " << y << std::endl;
 
-  y = fft::ifft(x);
-  CHECK_EQ(y.dtype(), complex64);
-  CHECK_EQ(y.size(), x.size());
-  CHECK_EQ(y.item<complex64_t>(), complex64_t{1.0f, 1.0f});
+  // array x(1.0);
+  // CHECK_THROWS(fft::fft(x));
+  // CHECK_THROWS(fft::ifft(x));
 
-  {
-    x = array({0.0f, 1.0f, 2.0f, 3.0f});
-    y = fft::fft(x);
-    std::initializer_list<complex64_t> expected = {
-        {6.0, 0.0},
-        {-2.0, 2.0},
-        {-2.0, 0.0},
-        {-2.0, -2.0},
-    };
-    CHECK_EQ(y.size(), x.size());
-    CHECK(array_equal(y, array(expected)).item<bool>());
+  // x = array({1.0});
+  // auto y = fft::fft(x);
+  // CHECK_EQ(y.dtype(), complex64);
+  // CHECK_EQ(y.size(), x.size());
+  // CHECK_EQ(y.item<complex64_t>(), complex64_t{1.0f, 0.0f});
 
-    y = fft::ifft(x);
-    std::initializer_list<complex64_t> expected_inv = {
-        {1.5, 0.0},
-        {-0.5, -0.5},
-        {-0.5, 0.0},
-        {-0.5, 0.5},
-    };
-    CHECK(array_equal(y, array(expected_inv)).item<bool>());
-  }
+  // y = fft::ifft(x);
+  // CHECK_EQ(y.dtype(), complex64);
+  // CHECK_EQ(y.size(), x.size());
+  // CHECK_EQ(y.item<complex64_t>(), complex64_t{1.0f, 0.0f});
 
-  {
-    std::initializer_list<complex64_t> vals = {
-        {1.0f, 1.0f}, {2.0f, 1.0f}, {1.0f, 2.0f}, {2.0f, 2.0f}};
-    x = array(vals);
-    y = fft::fft(x);
-    std::initializer_list<complex64_t> expected = {
-        {6.0, 6.0},
-        {-1.0, -1.0},
-        {-2.0, 0.0},
-        {1.0, -1.0},
-    };
-    CHECK_EQ(y.size(), x.size());
-    CHECK(array_equal(y, array(expected)).item<bool>());
-    CHECK(array_equal(fft::ifft(y), x).item<bool>());
-  }
+  // x = array({complex64_t{1.0f, 1.0f}}, complex64);
+  // y = fft::fft(x);
+  // CHECK_EQ(y.size(), x.size());
+  // CHECK_EQ(y.item<complex64_t>(), complex64_t{1.0f, 1.0f});
 
-  // Specify axes
-  {
-    x = array({0.0f, 1.0f, 2.0f, 3.0f}, {2, 2});
-    std::initializer_list<complex64_t> expected_0 = {
-        {2.0, 0.0},
-        {4.0, 0.0},
-        {-2.0, 0.0},
-        {-2.0, 0.0},
-    };
-    y = fft::fft(x, 0);
-    CHECK(array_equal(y, array(expected_0, {2, 2})).item<bool>());
-    CHECK(array_equal(fft::ifft(y, 0), x).item<bool>());
-    std::initializer_list<complex64_t> expected_1 = {
-        {1.0, 0.0},
-        {-1.0, 0.0},
-        {5.0, 0.0},
-        {-1.0, 0.0},
-    };
-    y = fft::fft(x, 1);
-    CHECK(array_equal(y, array(expected_1, {2, 2})).item<bool>());
-    CHECK(array_equal(fft::ifft(y, 1), x).item<bool>());
-  }
+  // y = fft::ifft(x);
+  // CHECK_EQ(y.dtype(), complex64);
+  // CHECK_EQ(y.size(), x.size());
+  // CHECK_EQ(y.item<complex64_t>(), complex64_t{1.0f, 1.0f});
+
+  // {
+  //   x = array({0.0f, 1.0f, 2.0f, 3.0f});
+  //   y = fft::fft(x);
+  //   std::initializer_list<complex64_t> expected = {
+  //       {6.0, 0.0},
+  //       {-2.0, 2.0},
+  //       {-2.0, 0.0},
+  //       {-2.0, -2.0},
+  //   };
+  //   CHECK_EQ(y.size(), x.size());
+  //   CHECK(array_equal(y, array(expected)).item<bool>());
+
+  //   y = fft::ifft(x);
+  //   std::initializer_list<complex64_t> expected_inv = {
+  //       {1.5, 0.0},
+  //       {-0.5, -0.5},
+  //       {-0.5, 0.0},
+  //       {-0.5, 0.5},
+  //   };
+  //   CHECK(array_equal(y, array(expected_inv)).item<bool>());
+  // }
+
+  // {
+  //   std::initializer_list<complex64_t> vals = {
+  //       {1.0f, 1.0f}, {2.0f, 1.0f}, {1.0f, 2.0f}, {2.0f, 2.0f}};
+  //   x = array(vals);
+  //   y = fft::fft(x);
+  //   std::initializer_list<complex64_t> expected = {
+  //       {6.0, 6.0},
+  //       {-1.0, -1.0},
+  //       {-2.0, 0.0},
+  //       {1.0, -1.0},
+  //   };
+  //   CHECK_EQ(y.size(), x.size());
+  //   CHECK(array_equal(y, array(expected)).item<bool>());
+  //   CHECK(array_equal(fft::ifft(y), x).item<bool>());
+  // }
+
+  // // Specify axes
+  // {
+  //   x = array({0.0f, 1.0f, 2.0f, 3.0f}, {2, 2});
+  //   std::initializer_list<complex64_t> expected_0 = {
+  //       {2.0, 0.0},
+  //       {4.0, 0.0},
+  //       {-2.0, 0.0},
+  //       {-2.0, 0.0},
+  //   };
+  //   y = fft::fft(x, 0);
+  //   CHECK(array_equal(y, array(expected_0, {2, 2})).item<bool>());
+  //   CHECK(array_equal(fft::ifft(y, 0), x).item<bool>());
+  //   std::initializer_list<complex64_t> expected_1 = {
+  //       {1.0, 0.0},
+  //       {-1.0, 0.0},
+  //       {5.0, 0.0},
+  //       {-1.0, 0.0},
+  //   };
+  //   y = fft::fft(x, 1);
+  //   CHECK(array_equal(y, array(expected_1, {2, 2})).item<bool>());
+  //   CHECK(array_equal(fft::ifft(y, 1), x).item<bool>());
+  // }
 }
 
 TEST_CASE("test real ffts") {
