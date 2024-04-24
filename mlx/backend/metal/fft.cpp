@@ -6,6 +6,7 @@
 #include "mlx/utils.h"
 
 #include <iostream>
+#include <set>
 
 namespace mlx::core {
 
@@ -19,11 +20,36 @@ int FFT::next_fast_n(int n) {
   return next_power_of_2(n);
 }
 
-// Plan the sequence of radices
+std::vector<int> prime_factors(int n) {
+  int z = 2;
+  std::vector<int> factors;
+  while (z * z <= n) {
+    if (n % z == 0) {
+      factors.push_back(z);
+      n /= z;
+    } else {
+      z++;
+    }
+  }
+  if (n > 1) {
+    factors.push_back(n);
+  }
+  return factors;
+}
+
+struct FFTPlan {
+  // Radix steps uses Stockham's algorithm normally
+  std::vector<int> stockham;
+  // Rader's algorithm decomposes prime - 1
+  std::vector<int> rader;
+};
+
 std::vector<int> FFT::plan_stockham_fft(int n) {
-  // A plan is a number of steps for each supported radix
   auto radices = FFT::supported_radices();
-  std::vector<int> plan(radices.size());
+  std::vector<int> plan(radices.size(), 0);
+  if (n == 1) {
+    return plan;
+  }
   for (int i = 0; i < radices.size(); i++) {
     int radix = radices[i];
     while (n % radix == 0) {
@@ -35,7 +61,41 @@ std::vector<int> FFT::plan_stockham_fft(int n) {
     }
   }
   // return an empty vector if unplannable
-  return std::vector<int>();
+  throw std::runtime_error("Unplannable");
+}
+
+// Plan the sequence of radices
+FFTPlan plan_fft(int n) {
+  auto radices = FFT::supported_radices();
+  std::set<int> radices_set(radices.begin(), radices.end());
+
+  FFTPlan plan;
+  plan.rader = std::vector<int>(radices.size(), 0);
+  // A plan is a number of steps for each supported radix
+  auto factors = prime_factors(n);
+  for (int factor : factors) {
+    // Make sure the factor is a supported radix
+    if (radices_set.find(factor) == radices_set.end()) {
+      // See if we can use Rader's algorithm to Stockham decompose n - 1
+      auto rader_factors = prime_factors(factor - 1);
+      int last_factor = -1;
+      for (int rf : rader_factors) {
+        // We don't nest Rader's algorithm so if one of the n - 1
+        // factors isn't Stockham decomposable we give up and do Bluestein's
+        if (radices_set.find(rf) == radices_set.end()) {
+          return FFTPlan();
+        }
+      }
+      plan.rader = FFT::plan_stockham_fft(factor - 1);
+      n /= factor;
+      break;
+    }
+  }
+
+  // std::cout << "n " << std::endl;
+
+  plan.stockham = FFT::plan_stockham_fft(n);
+  return plan;
 }
 
 void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -119,8 +179,13 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
       {});
 
   int bluestein_n = -1;
-  auto plan = plan_stockham_fft(n);
-  plan = {0, 0, 2, 0, 0};
+  auto plan = plan_fft(n);
+  auto radices = FFT::supported_radices();
+  // for (int i = 0; i < 5; i++) {
+  //   std::cout << "stockham plan " << radices[i] << " " << plan.stockham[i] <<
+  //   std::endl; std::cout << "rader plan " << radices[i] << " " <<
+  //   plan.rader[i] << std::endl;
+  // }
   // if (plan.size() == 0) {
   //   // Bluestein's algorithm transforms an FFT to
   //   // a convolution of size > 2n + 1.
@@ -144,13 +209,26 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
   std::vector<MTLFC> func_consts = {
       make_bool(&inverse_, 0), make_bool(&power_of_2, 1)};
 
-  auto radices = FFT::supported_radices();
+  // for (int p: plan.stockham) {
+  //   std::cout << "stock p " << p << std::endl;
+  // }
+  // for (int p: plan.rader) {
+  //   std::cout << "rader p " << p << std::endl;
+  // }
+
   int index = 3;
   int elems_per_thread = 0;
-  for (int i = 0; i < plan.size(); i++) {
-    func_consts.push_back(make_int(&plan[i], index));
+  for (int i = 0; i < plan.stockham.size(); i++) {
+    func_consts.push_back(make_int(&plan.stockham[i], index));
     index += 1;
-    if (plan[i] > 0) {
+    if (plan.stockham[i] > 0) {
+      elems_per_thread = std::max(elems_per_thread, radices[i]);
+    }
+  }
+  for (int i = 0; i < plan.rader.size(); i++) {
+    func_consts.push_back(make_int(&plan.rader[i], index));
+    index += 1;
+    if (plan.rader[i] > 0) {
       elems_per_thread = std::max(elems_per_thread, radices[i]);
     }
   }

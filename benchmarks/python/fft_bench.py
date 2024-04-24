@@ -58,7 +58,7 @@ def run_bench_mps(system_size, fft_sizes):
 
 
 def time_fft():
-    x = range(4, 1024)
+    x = range(17, 18)
     system_size = int(2**24)
 
     with mx.stream(mx.gpu):

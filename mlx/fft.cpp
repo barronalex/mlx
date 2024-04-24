@@ -158,7 +158,8 @@ array fft_impl(
     }
 
     // Now calculate the raders constant
-    auto [b_q, g_q, g_minus_q] = compute_raders_constants(n_1d);
+    // This is based on the size of the rader's decomp
+    auto [b_q, g_q, g_minus_q] = compute_raders_constants(5);
     return array(
         out_shape,
         out_type,
@@ -519,6 +520,7 @@ std::tuple<array, array, array> compute_raders_constants(int n) {
     g_q[i] = mod_exp(proot, i, n);
     g_minus_q[i] = mod_exp(inv, i, n);
   }
+  // OH this isn't n - 1
   array g_q_arr(g_q.begin(), {n - 1});
   array g_minus_q_arr(g_minus_q.begin(), {n - 1});
   array b_q =

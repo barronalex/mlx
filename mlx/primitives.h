@@ -907,7 +907,8 @@ class FFT : public UnaryPrimitive {
   static std::vector<int> plan_stockham_fft(int n);
   inline static const std::vector<int> supported_radices() {
     // Ordered by preference in decomposition.
-    return {7, 5, 4, 3, 2};
+    // return {7, 5, 4, 3, 2};
+    return {3, 2};
   }
 
  private:
