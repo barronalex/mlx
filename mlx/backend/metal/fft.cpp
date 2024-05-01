@@ -12,9 +12,9 @@ namespace mlx::core {
 
 using MTLFC = std::tuple<const void*, MTL::DataType, NS::UInteger>;
 
-#define MAX_SINGLE_FFT_SIZE 2048
+#define MAX_SINGLE_FFT_SIZE 4096
 // Threadgroup memory batching improves throughput for small n
-#define MIN_THREADGROUP_MEM_SIZE 64
+#define MIN_THREADGROUP_MEM_SIZE 256
 
 int FFT::next_fast_n(int n) {
   return next_power_of_2(n);
@@ -37,14 +37,7 @@ std::vector<int> prime_factors(int n) {
   return factors;
 }
 
-struct FFTPlan {
-  // Radix steps uses Stockham's algorithm normally
-  std::vector<int> stockham;
-  // Rader's algorithm decomposes prime - 1
-  std::vector<int> rader;
-};
-
-std::vector<int> FFT::plan_stockham_fft(int n) {
+std::vector<int> plan_stockham_fft(int n) {
   auto radices = FFT::supported_radices();
   std::vector<int> plan(radices.size(), 0);
   if (n == 1) {
@@ -60,12 +53,11 @@ std::vector<int> FFT::plan_stockham_fft(int n) {
       }
     }
   }
-  // return an empty vector if unplannable
   throw std::runtime_error("Unplannable");
 }
 
 // Plan the sequence of radices
-FFTPlan plan_fft(int n) {
+FFTPlan FFT::plan_fft(int n) {
   auto radices = FFT::supported_radices();
   std::set<int> radices_set(radices.begin(), radices.end());
 
@@ -86,16 +78,29 @@ FFTPlan plan_fft(int n) {
           return FFTPlan();
         }
       }
-      plan.rader = FFT::plan_stockham_fft(factor - 1);
+      plan.rader = plan_stockham_fft(factor - 1);
+      plan.rader_n = factor;
       n /= factor;
       break;
     }
   }
 
-  // std::cout << "n " << std::endl;
-
-  plan.stockham = FFT::plan_stockham_fft(n);
+  plan.stockham = plan_stockham_fft(n);
   return plan;
+}
+
+std::pair<int, int> find_first_last_nonzero_radix(std::vector<int> steps) {
+  auto radices = FFT::supported_radices();
+  auto non_zero = [](int p) { return p > 0; };
+  auto forward_it = std::find_if(steps.begin(), steps.end(), non_zero);
+  if (forward_it == steps.end()) {
+    return std::make_pair(0, 0);
+  }
+  int last_radix = radices[forward_it - steps.begin()];
+
+  auto back_it = std::find_if(steps.rbegin(), steps.rend(), non_zero);
+  int first_radix = radices[steps.rend() - back_it - 1];
+  return std::make_pair(first_radix, last_radix);
 }
 
 void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -209,14 +214,8 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
   std::vector<MTLFC> func_consts = {
       make_bool(&inverse_, 0), make_bool(&power_of_2, 1)};
 
-  // for (int p: plan.stockham) {
-  //   std::cout << "stock p " << p << std::endl;
-  // }
-  // for (int p: plan.rader) {
-  //   std::cout << "rader p " << p << std::endl;
-  // }
-
-  int index = 3;
+  // Start of radix/rader step constants
+  int index = 7;
   int elems_per_thread = 0;
   for (int i = 0; i < plan.stockham.size(); i++) {
     func_consts.push_back(make_int(&plan.stockham[i], index));
@@ -234,9 +233,18 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
   }
   func_consts.push_back(make_int(&elems_per_thread, 2));
 
+  // Compute which one is the first radix
+  auto [first_radix, last_radix] = find_first_last_nonzero_radix(plan.stockham);
+  auto [first_rader, last_rader] = find_first_last_nonzero_radix(plan.rader);
+
+  func_consts.push_back(make_int(&first_radix, 3));
+  func_consts.push_back(make_int(&last_radix, 4));
+  func_consts.push_back(make_int(&first_rader, 5));
+  func_consts.push_back(make_int(&last_rader, 6));
+
   // The overall number of FFTs we're going to compute for this input
   int total_batch_size = in.size() / in.shape(axes_[0]);
-  int threads_per_fft = fft_size / elems_per_thread;
+  int threads_per_fft = (fft_size + elems_per_thread - 1) / elems_per_thread;
 
   // We batch among threadgroups for improved efficiency when n is small
   int threadgroup_batch_size = std::max(MIN_THREADGROUP_MEM_SIZE / fft_size, 1);
@@ -276,6 +284,7 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
     auto& raders_b_q = inputs[1];
     auto& raders_g_q = inputs[2];
     auto& raders_g_minus_q = inputs[3];
+    // std::cout << "raders b_q " << raders_b_q << std::endl;
     compute_encoder.set_input_array(raders_b_q, 2);
     compute_encoder.set_input_array(raders_g_q, 3);
     compute_encoder.set_input_array(raders_g_minus_q, 4);
@@ -292,6 +301,7 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
     } else {
       compute_encoder->setBytes(&n, sizeof(int), 5);
       compute_encoder->setBytes(&total_batch_size, sizeof(int), 6);
+      compute_encoder->setBytes(&plan.rader_n, sizeof(int), 7);
     }
 
     // std::cout << "fft size " << fft_size << std::endl;

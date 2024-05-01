@@ -10,8 +10,8 @@
 
 #include <iostream>
 
-#define MAX_STOCKHAM_FFT_SIZE 2048
-#define MAX_BLUESTEIN_FFT_SIZE 1024
+#define MAX_STOCKHAM_FFT_SIZE 4096
+#define MAX_BLUESTEIN_FFT_SIZE 2048
 
 namespace mlx::core::fft {
 
@@ -132,8 +132,8 @@ array fft_impl(
 
   if (stream.device == Device::gpu) {
     // Here are the code paths for GPU FFT:
-    // if stockham_decomposable(N) && N <= MAX_STOCKHAM:
-    //     stockham()
+    // if rader_decomposable(N) && N <= MAX_STOCKHAM:
+    //     rader_stockham(N)
     // else if N <= MAX_BLUESTEIN:
     //     fused_bluestein()
     // else if N > MAX_BLUESTEIN && largest_prime_factor(N) <= MAX_BLUESTEIN
@@ -157,9 +157,17 @@ array fft_impl(
       return gpu_irfft(a, n_1d, axis, s);
     }
 
-    // Now calculate the raders constant
-    // This is based on the size of the rader's decomp
-    auto [b_q, g_q, g_minus_q] = compute_raders_constants(5);
+    // Plan the FFT
+    FFTPlan plan = FFT::plan_fft(n_1d);
+    // std::cout << "rader n " << plan.rader_n << std::endl;
+    // for (int p: plan.stockham) {
+    //   std::cout << "stockham p " << p << std::endl;
+    // }
+    // for (int p: plan.rader) {
+    //   std::cout << "rader p " << p << std::endl;
+    // }
+    auto [b_q, g_q, g_minus_q] =
+        compute_raders_constants(std::max(plan.rader_n, 11));
     return array(
         out_shape,
         out_type,
@@ -508,25 +516,31 @@ int primitive_root(int n) {
   return -1;
 }
 
-std::tuple<array, array, array> compute_raders_constants(int n) {
+std::tuple<array, array, array> compute_raders_constants(int raders_n) {
+  // First figure out the raders_constant
   // Calculate primitive root
-  int proot = primitive_root(n);
+  int proot = primitive_root(raders_n);
   // Fermat's little theorem
-  int inv = mod_exp(proot, n - 2, n);
+  int inv = mod_exp(proot, raders_n - 2, raders_n);
   // Now get the g_minus_q sequence
-  std::vector<short> g_q(n - 1);
-  std::vector<short> g_minus_q(n - 1);
-  for (int i = 0; i < n - 1; i++) {
-    g_q[i] = mod_exp(proot, i, n);
-    g_minus_q[i] = mod_exp(inv, i, n);
+  std::vector<short> g_q(raders_n - 1);
+  std::vector<short> g_minus_q(raders_n - 1);
+  for (int i = 0; i < raders_n - 1; i++) {
+    g_q[i] = mod_exp(proot, i, raders_n);
+    g_minus_q[i] = mod_exp(inv, i, raders_n);
   }
-  // OH this isn't n - 1
-  array g_q_arr(g_q.begin(), {n - 1});
-  array g_minus_q_arr(g_minus_q.begin(), {n - 1});
+  array g_q_arr(g_q.begin(), {raders_n - 1});
+  array g_minus_q_arr(g_minus_q.begin(), {raders_n - 1});
   array b_q =
-      exp(complex64_t{0.0f, 2.0f} * astype(g_minus_q_arr, float32) / n * -M_PI);
+      exp(complex64_t{0.0f, 2.0f} * astype(g_minus_q_arr, float32) / raders_n *
+          -M_PI);
   array b_q_fft = fft_impl(
-      b_q, {n - 1}, {0}, /* real= */ false, /* inverse= */ false, Device::cpu);
+      b_q,
+      {raders_n - 1},
+      {0},
+      /* real= */ false,
+      /* inverse= */ false,
+      Device::cpu);
   return std::make_tuple(b_q_fft, g_q_arr, g_minus_q_arr);
 }
 

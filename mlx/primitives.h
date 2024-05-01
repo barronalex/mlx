@@ -884,6 +884,15 @@ class Expm1 : public UnaryPrimitive {
   void eval(const std::vector<array>& inputs, array& out);
 };
 
+struct FFTPlan {
+  // List of radices in Stockham decomposition
+  std::vector<int> stockham;
+  // List of radices in Rader decomposition
+  std::vector<int> rader;
+  // Rader factor, 1 if no rader factors
+  int rader_n = 1;
+};
+
 class FFT : public UnaryPrimitive {
  public:
   explicit FFT(
@@ -904,11 +913,10 @@ class FFT : public UnaryPrimitive {
 
   // GPU FFT planning
   static int next_fast_n(int n);
-  static std::vector<int> plan_stockham_fft(int n);
+  static FFTPlan plan_fft(int n);
   inline static const std::vector<int> supported_radices() {
     // Ordered by preference in decomposition.
-    // return {7, 5, 4, 3, 2};
-    return {3, 2};
+    return {7, 5, 4, 3, 2};
   }
 
  private:
