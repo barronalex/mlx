@@ -2,7 +2,10 @@
 
 #include "mlx/backend/metal/metal.h"
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/unordered_map.h>
+#include <nanobind/stl/variant.h>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -90,6 +93,15 @@ void init_metal(nb::module_& m) {
         int: The previous cache limit in bytes.
       )pbdoc");
   metal.def(
+      "clear_cache",
+      &metal::clear_cache,
+      R"pbdoc(
+      Clear the memory cache.
+
+      After calling this, :func:`get_cache_memory` should return ``0``.
+      )pbdoc");
+
+  metal.def(
       "start_capture",
       &metal::start_capture,
       "path"_a,
@@ -99,14 +111,26 @@ void init_metal(nb::module_& m) {
       Args:
         path (str): The path to save the capture which should have
           the extension ``.gputrace``.
-
-      Returns:
-        bool: Whether the capture was successfully started.
       )pbdoc");
   metal.def(
       "stop_capture",
       &metal::stop_capture,
       R"pbdoc(
       Stop a Metal capture.
+      )pbdoc");
+  metal.def(
+      "device_info",
+      &metal::device_info,
+      R"pbdoc(
+      Get information about the GPU device and system settings.
+
+      Currently returns:
+
+      * ``architecture``
+      * ``max_buffer_size``
+      * ``max_recommended_working_set_size``
+
+      Returns:
+          dict: A dictionary with string keys and string or integer values.
       )pbdoc");
 }

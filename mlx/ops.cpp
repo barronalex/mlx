@@ -320,7 +320,7 @@ array reshape(
         "[reshape] Cannot infer the shape of an empty array");
   }
 
-  // Check the the reshaping is valid
+  // Check that the reshaping is valid
   if (a.size() != size) {
     std::ostringstream msg;
     msg << "[reshape] Cannot reshape array of size " << a.size()
@@ -426,7 +426,7 @@ array expand_dims(const array& a, int axis, StreamOrDevice s /* = {} */) {
   int ax = axis < 0 ? axis + out_dim : axis;
   if (ax < 0 || ax >= out_dim) {
     std::ostringstream msg;
-    msg << "[expand_dims] Invalid axes " << axis << " for output array with "
+    msg << "[expand_dims] Invalid axis " << axis << " for output array with "
         << a.ndim() << " dimensions.";
     throw std::invalid_argument(msg.str());
   }
@@ -452,7 +452,7 @@ array expand_dims(
     ax = ax < 0 ? ax + out_ndim : ax;
     if (ax < 0 || ax >= out_ndim) {
       std::ostringstream msg;
-      msg << "[expand_dims] Invalid axes " << ax << " for output array with "
+      msg << "[expand_dims] Invalid axis " << ax << " for output array with "
           << a.ndim() << " dimensions.";
       throw std::invalid_argument(msg.str());
     }
@@ -591,7 +591,6 @@ array slice_update(
   if (!has_neg_strides && upd_shape == src.shape()) {
     return astype(update_broadcasted, src.dtype(), s);
   }
-
   return array(
       src.shape(),
       src.dtype(),
@@ -2192,6 +2191,16 @@ array arctanh(const array& a, StreamOrDevice s /* = {} */) {
       a.shape(), dtype, std::make_shared<ArcTanh>(to_stream(s)), {input});
 }
 
+array degrees(const array& a, StreamOrDevice s /* = {} */) {
+  auto dtype = at_least_float(a.dtype());
+  return multiply(a, array(180.0 / M_PI, dtype), s);
+}
+
+array radians(const array& a, StreamOrDevice s /* = {} */) {
+  auto dtype = at_least_float(a.dtype());
+  return multiply(a, array(M_PI / 180.0, dtype), s);
+}
+
 array log(const array& a, StreamOrDevice s /* = {} */) {
   auto dtype = at_least_float(a.dtype());
   auto input = astype(a, dtype, s);
@@ -2937,7 +2946,8 @@ inline std::vector<int> conv_out_shape(
   return out_shape;
 }
 
-inline void run_conv_checks(const array& in, const array& wt, int n_dim) {
+inline void
+run_conv_checks(const array& in, const array& wt, int n_dim, int groups) {
   if (!issubdtype(in.dtype(), floating)) {
     std::ostringstream msg;
     msg << "[conv] Invalid input array with type " << in.dtype() << "."
@@ -2962,11 +2972,35 @@ inline void run_conv_checks(const array& in, const array& wt, int n_dim) {
     throw std::invalid_argument(msg.str());
   }
 
-  if (in.shape(n_dim + 1) != wt.shape(n_dim + 1)) {
+  if (in.shape(n_dim + 1) % groups != 0) {
     std::ostringstream msg;
-    msg << "[conv] Expect the input channels in the input"
-        << " and weight array to match but got shapes -"
-        << " input: " << in.shape() << " and weight: " << wt.shape();
+    msg << "[conv] The input channels must be divisible by the number"
+        << " of groups. Got input with shape " << in.shape() << " and "
+        << groups << " groups.";
+    throw std::invalid_argument(msg.str());
+  }
+
+  if (groups > 1 && wt.shape(0) % groups != 0) {
+    std::ostringstream msg;
+    msg << "[conv] If groups > 1, the output channels must be divisible by the number"
+        << " of groups. Got " << wt.shape(0) << " output channels and "
+        << groups << " groups.";
+    throw std::invalid_argument(msg.str());
+  }
+
+  if (in.shape(n_dim + 1) != (groups * wt.shape(n_dim + 1))) {
+    std::ostringstream msg;
+    if (groups == 1) {
+      msg << "[conv] Expect the input channels in the input"
+          << " and weight array to match but got shapes -"
+          << " input: " << in.shape() << " and weight: " << wt.shape();
+
+    } else {
+      msg << "Given groups=" << groups << " and weights of shape " << wt.shape()
+          << ", expected to have " << (groups * wt.shape(n_dim + 1))
+          << " input channels but got " << in.shape(n_dim + 1)
+          << " input channels instead.";
+    }
     throw std::invalid_argument(msg.str());
   }
 }
@@ -3029,8 +3063,9 @@ array conv_general(
     bool flip /* = false */,
     StreamOrDevice s /* = {} */) {
   // Run checks
-  if (groups != 1) {
-    throw std::invalid_argument("[conv] Cannot handle groups != 1 yet");
+  if (groups != 1 && in.ndim() != 3) {
+    throw std::invalid_argument(
+        "[conv] Can only handle groups != 1 in 1D convolutions.");
   }
 
   int spatial_dims = in.ndim() - 2;
@@ -3042,7 +3077,7 @@ array conv_general(
   }
 
   // Run checks
-  run_conv_checks(in, wt, spatial_dims);
+  run_conv_checks(in, wt, spatial_dims, groups);
 
   // Type promotion
   auto out_type = promote_types(in.dtype(), wt.dtype());
@@ -3240,7 +3275,9 @@ std::tuple<array, array, array> quantize(
   }
 
   // Compute some constants used for the quantization
-  int n_bins = (1 << bits) - 1; // 2**bits - 1
+  array n_bins((1 << bits) - 1, w.dtype()); // 2**bits - 1
+  array eps(1e-7, w.dtype());
+  array zero(0, w.dtype());
   int el_per_int = 32 / bits;
   array shifts = power(array(2, uint32), arange(0, 32, bits, uint32, s), s);
   shifts = reshape(shifts, {1, 1, -1}, s);
@@ -3264,18 +3301,28 @@ std::tuple<array, array, array> quantize(
       reshape(w, {w.shape(0), w.shape(1) / group_size, group_size}, s);
   array w_max = max(packed_w, /* axis= */ -1, /* keepdims= */ true, s);
   array w_min = min(packed_w, /* axis= */ -1, /* keepdims= */ true, s);
-  array delta = divide(subtract(w_max, w_min, s), array(n_bins, w.dtype()), s);
-  array scales = squeeze(delta, -1, s);
-  array biases = squeeze(w_min, -1, s);
+
+  array mask = greater(abs(w_min, s), abs(w_max, s), s);
+  array scales = maximum(divide(subtract(w_max, w_min, s), n_bins, s), eps, s);
+  scales = where(mask, scales, negative(scales), s);
+  array edge = where(mask, w_min, w_max, s);
+  array q0 = round(divide(edge, scales, s), s);
+  scales = where(not_equal(q0, zero, s), divide(edge, q0, s), scales);
+  array biases = where(equal(q0, zero, s), zero, edge);
 
   // Quantize and pack w
-  packed_w =
-      astype(round(divide(subtract(packed_w, w_min, s), delta, s), s), uint32);
+  packed_w = astype(
+      clip(
+          round(divide(subtract(packed_w, biases, s), scales, s), s),
+          zero,
+          n_bins),
+      uint32);
   packed_w = reshape(packed_w, {w.shape(0), -1, el_per_int}, s);
   packed_w = sum(
       multiply(packed_w, shifts, s), /* axis= */ 2, /* keepdims= */ false, s);
 
-  return std::make_tuple(packed_w, scales, biases);
+  return std::make_tuple(
+      packed_w, squeeze(scales, -1, s), squeeze(biases, -1, s));
 }
 
 array dequantize(
@@ -3572,6 +3619,172 @@ array addmm(
   return out;
 }
 
+/** Compute matrix product with tile-level masking */
+array block_masked_mm(
+    array a,
+    array b,
+    int block_size,
+    std::optional<array> mask_out /* = std::nullopt */,
+    std::optional<array> mask_lhs /* = std::nullopt */,
+    std::optional<array> mask_rhs /* = std::nullopt */,
+    StreamOrDevice s /* = {} */) {
+  // If no masks, just perform regular matmul
+  if (!mask_out && !mask_lhs && !mask_rhs) {
+    return matmul(a, b, s);
+  }
+
+  bool has_out_mask = mask_out.has_value();
+  bool has_operand_mask = mask_lhs.has_value() || mask_rhs.has_value();
+
+  // Check valid tile sizes
+  // TODO: Add support for 16x16 tile
+  if (block_size != 32 && block_size != 64) {
+    std::ostringstream msg;
+    msg << "[block_masked_mm] Only block_sizes 32, 64 are supported."
+        << "Got block size " << block_size << ".";
+    throw std::invalid_argument(msg.str());
+  }
+
+  // Do shape checks for operands
+  int in_a_ndim = a.ndim();
+  int in_b_ndim = b.ndim();
+
+  if (a.ndim() == 0 || b.ndim() == 0) {
+    throw std::invalid_argument(
+        "[block_masked_mm] Got 0 dimension input. Inputs must "
+        "have at least one dimension.");
+  }
+
+  if (a.ndim() == 1) {
+    // Insert a singleton dim in the beginning
+    a = reshape(a, {1, -1}, s);
+  }
+  if (b.ndim() == 1) {
+    // Insert a singleton dim at the end
+    b = reshape(b, {-1, 1}, s);
+  }
+
+  if (a.shape(-1) != b.shape(-2)) {
+    std::ostringstream msg;
+    msg << "[block_masked_mm] Last dimension of first input with shape "
+        << a.shape() << " must match second to last dimension of"
+        << " second input with shape " << b.shape() << ".";
+    throw std::invalid_argument(msg.str());
+  }
+
+  // Type promotion
+  auto out_type = result_type(a, b);
+  if (!issubdtype(out_type, floating)) {
+    std::ostringstream msg;
+    msg << "[block_masked_mm] Only real floating point types are supported but "
+        << a.dtype() << " and " << b.dtype()
+        << " were provided which results in " << out_type
+        << ", which is not a real floating point type.";
+    throw std::invalid_argument(msg.str());
+  }
+
+  a = astype(a, out_type, s);
+  b = astype(b, out_type, s);
+
+  // Handle broadcasting
+  std::vector<int> bsx_a(a.shape().begin(), a.shape().end() - 2);
+  std::vector<int> bsx_b(b.shape().begin(), b.shape().end() - 2);
+
+  auto bsx_shape = broadcast_shapes(bsx_a, bsx_b);
+
+  bsx_shape.push_back(1);
+  bsx_shape.push_back(1);
+  int nd = bsx_shape.size();
+
+  int M = a.shape(-2);
+  int N = b.shape(-1);
+  int K = a.shape(-1);
+
+  // Prepare A
+  bsx_shape[nd - 2] = M;
+  bsx_shape[nd - 1] = K;
+  a = broadcast_to(a, bsx_shape, s);
+
+  // Prepare B
+  bsx_shape[nd - 2] = K;
+  bsx_shape[nd - 1] = N;
+  b = broadcast_to(b, bsx_shape, s);
+
+  // Get output shape
+  auto out_shape = bsx_shape;
+  out_shape[nd - 2] = M;
+  out_shape[nd - 1] = N;
+
+  // Determine mask shape requirments
+  int tm = (M + block_size - 1) / block_size;
+  int tn = (N + block_size - 1) / block_size;
+  int tk = (K + block_size - 1) / block_size;
+
+  // Broadcast and astype mask
+  auto broadcast_mask = [](array mask,
+                           std::vector<int>& bs_shape,
+                           int y,
+                           int x,
+                           StreamOrDevice s) {
+    int nd_bsx = bs_shape.size();
+    bs_shape[nd_bsx - 2] = y;
+    bs_shape[nd_bsx - 1] = x;
+    mask = astype(mask, bool_, s);
+    return broadcast_to(mask, bs_shape, s);
+  };
+
+  // Out mask
+  array mask_out_p = mask_out.value_or(array({true}));
+  if (in_a_ndim == 1 || in_b_ndim == 1) {
+    std::vector<int> ex_dims;
+    if (in_a_ndim == 1)
+      ex_dims.push_back(-2);
+    if (in_b_ndim == 1)
+      ex_dims.push_back(-1);
+    mask_out_p = expand_dims(mask_out_p, ex_dims, s);
+  }
+  mask_out_p = broadcast_mask(mask_out_p, bsx_shape, tm, tn, s);
+
+  std::vector<array> inputs = {a, b, mask_out_p};
+
+  // Operand masks
+  if (has_operand_mask) {
+    // LHS mask
+    array mask_lhs_p = mask_lhs.value_or(array({true}));
+    if (in_a_ndim == 1) {
+      mask_lhs_p = expand_dims(mask_lhs_p, -2, s);
+    }
+    mask_lhs_p = broadcast_mask(mask_lhs_p, bsx_shape, tm, tk, s);
+
+    // RHS mask
+    array mask_rhs_p = mask_rhs.value_or(array({true}));
+    if (in_b_ndim == 1) {
+      mask_rhs_p = expand_dims(mask_lhs_p, -1, s);
+    }
+    mask_rhs_p = broadcast_mask(mask_rhs_p, bsx_shape, tk, tn, s);
+
+    inputs.push_back(mask_lhs_p);
+    inputs.push_back(mask_rhs_p);
+  }
+
+  // Caculate array
+  auto out = array(
+      out_shape,
+      out_type,
+      std::make_shared<BlockMaskedMM>(to_stream(s), block_size),
+      std::move(inputs));
+
+  // Remove the possibly inserted singleton dimensions
+  if (in_a_ndim == 1 || in_b_ndim == 1) {
+    out_shape.erase(
+        out_shape.end() - ((in_a_ndim == 1) ? 2 : 1),
+        out_shape.end() - ((in_b_ndim == 1) ? 0 : 1));
+    out = reshape(out, out_shape, s);
+  }
+
+  return out;
+}
+
 array diagonal(
     const array& a,
     int offset /* = 0 */,
@@ -3765,6 +3978,79 @@ array number_of_elements(
 array conjugate(const array& a, StreamOrDevice s /* = {} */) {
   return array(
       a.shape(), a.dtype(), std::make_shared<Conjugate>(to_stream(s)), {a});
+}
+
+array bitwise_impl(
+    const array& a,
+    const array& b,
+    BitwiseBinary::Op op,
+    const std::string& op_name,
+    const StreamOrDevice& s) {
+  auto out_type = promote_types(a.dtype(), b.dtype());
+  if (!(issubdtype(out_type, integer) || out_type == bool_)) {
+    std::ostringstream msg;
+    msg << "[" << op_name
+        << "] Only allowed on integer or boolean types "
+           "but got types "
+        << a.dtype() << " and " << b.dtype() << ".";
+    throw std::runtime_error(msg.str());
+  }
+  auto inputs =
+      broadcast_arrays(astype(a, out_type, s), astype(b, out_type, s), s);
+  return array(
+      a.shape(),
+      out_type,
+      std::make_shared<BitwiseBinary>(to_stream(s), op),
+      std::move(inputs));
+}
+
+array bitwise_and(const array& a, const array& b, StreamOrDevice s /* = {} */) {
+  return bitwise_impl(a, b, BitwiseBinary::Op::And, "bitwise_and", s);
+}
+array operator&(const array& a, const array& b) {
+  return bitwise_and(a, b);
+}
+
+array bitwise_or(const array& a, const array& b, StreamOrDevice s /* = {} */) {
+  return bitwise_impl(a, b, BitwiseBinary::Op::Or, "bitwise_or", s);
+}
+array operator|(const array& a, const array& b) {
+  return bitwise_or(a, b);
+}
+
+array bitwise_xor(const array& a, const array& b, StreamOrDevice s /* = {} */) {
+  return bitwise_impl(a, b, BitwiseBinary::Op::Xor, "bitwise_xor", s);
+}
+array operator^(const array& a, const array& b) {
+  return bitwise_xor(a, b);
+}
+
+array left_shift(const array& a, const array& b, StreamOrDevice s /* = {} */) {
+  // Bit shift on bool always up-casts to uint8
+  auto t = promote_types(result_type(a, b), uint8);
+  return bitwise_impl(
+      astype(a, t, s),
+      astype(b, t, s),
+      BitwiseBinary::Op::LeftShift,
+      "left_shift",
+      s);
+}
+array operator<<(const array& a, const array& b) {
+  return left_shift(a, b);
+}
+
+array right_shift(const array& a, const array& b, StreamOrDevice s /* = {} */) {
+  // Bit shift on bool always up-casts to uint8
+  auto t = promote_types(result_type(a, b), uint8);
+  return bitwise_impl(
+      astype(a, t, s),
+      astype(b, t, s),
+      BitwiseBinary::Op::RightShift,
+      "right_shift",
+      s);
+}
+array operator>>(const array& a, const array& b) {
+  return right_shift(a, b);
 }
 
 } // namespace mlx::core

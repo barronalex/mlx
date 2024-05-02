@@ -265,8 +265,7 @@ MTL::Library* Device::get_library_(const std::string& source_string) {
   // Throw error if unable to compile library
   if (!mtl_lib) {
     std::ostringstream msg;
-    msg << "[metal::Device] Unable to load build metal library from source"
-        << "\n";
+    msg << "[metal::Device] Unable to build metal library from source" << "\n";
     if (error) {
       msg << error->localizedDescription()->utf8String() << "\n";
     }
@@ -285,8 +284,7 @@ MTL::Library* Device::get_library_(const MTL::StitchedLibraryDescriptor* desc) {
   // Throw error if unable to compile library
   if (!mtl_lib) {
     std::ostringstream msg;
-    msg << "[metal::Device] Unable to load build stitched metal library"
-        << "\n";
+    msg << "[metal::Device] Unable to build stitched metal library" << "\n";
     if (error) {
       msg << error->localizedDescription()->utf8String() << "\n";
     }
@@ -543,17 +541,29 @@ Device& device(mlx::core::Device) {
   return metal_device;
 }
 
-std::shared_ptr<void> new_scoped_memory_pool() {
+std::unique_ptr<void, std::function<void(void*)>> new_scoped_memory_pool() {
   auto dtor = [](void* ptr) {
     static_cast<NS::AutoreleasePool*>(ptr)->release();
   };
-  return std::shared_ptr<void>(NS::AutoreleasePool::alloc()->init(), dtor);
+  return std::unique_ptr<void, std::function<void(void*)>>(
+      NS::AutoreleasePool::alloc()->init(), dtor);
 }
 
 void new_stream(Stream stream) {
   if (stream.device == mlx::core::Device::gpu) {
     device(stream.device).new_queue(stream.index);
   }
+}
+
+std::unordered_map<std::string, std::variant<std::string, size_t>>
+device_info() {
+  auto raw_device = device(default_device()).mtl_device();
+  auto arch = std::string(raw_device->architecture()->name()->utf8String());
+  return {
+      {"architecture", arch},
+      {"max_buffer_length", raw_device->maxBufferLength()},
+      {"max_recommended_working_set_size",
+       raw_device->recommendedMaxWorkingSetSize()}};
 }
 
 } // namespace mlx::core::metal
