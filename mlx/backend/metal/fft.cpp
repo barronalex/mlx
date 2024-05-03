@@ -75,7 +75,7 @@ FFTPlan FFT::plan_fft(int n) {
         // We don't nest Rader's algorithm so if one of the n - 1
         // factors isn't Stockham decomposable we give up and do Bluestein's
         if (radices_set.find(rf) == radices_set.end()) {
-          return FFTPlan();
+          throw std::runtime_error("Unplannable");
         }
       }
       plan.rader = plan_stockham_fft(factor - 1);
@@ -100,6 +100,8 @@ std::pair<int, int> find_first_last_nonzero_radix(std::vector<int> steps) {
 
   auto back_it = std::find_if(steps.rbegin(), steps.rend(), non_zero);
   int first_radix = radices[steps.rend() - back_it - 1];
+  // std::cout << "first radix " << first_radix << std::endl;
+  // std::cout << "last radix " << last_radix << std::endl;
   return std::make_pair(first_radix, last_radix);
 }
 

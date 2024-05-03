@@ -40,8 +40,154 @@ float2 complex_mul(float2 a, float2 b) {
   return c;
 }
 
-typedef void (
-    *RadixFunc)(int, int, thread float2*, thread int*, thread float2*);
+float2 get_twiddle(int k, int p) {
+  float theta = -2.0f * k * M_PI_F / p;
+
+  float2 twiddle = {metal::fast::cos(theta), metal::fast::sin(theta)};
+  return twiddle;
+}
+
+typedef void (*RadixFunc)(thread float2*, thread float2*);
+
+template <int radix, RadixFunc radix_func>
+void radix_n(
+    int i,
+    int p,
+    thread float2* x,
+    thread int* indices,
+    thread float2* y) {
+  // i: the index in the overall DFT that we're processing.
+  // p: the size of the DFTs we're merging at this step.
+  // m: how many threads are working on this DFT.
+
+  int k = i % p;
+  // int k = i & (p - 1);
+  int j = (i / p) * radix * p + k;
+  // int j = ((i - k) << 2) + k;
+
+  // Apply twiddles based on where in the decomposition we are
+  float2 twiddle_1 = get_twiddle(k, radix * p);
+  float2 twiddle = twiddle_1;
+  x[1] = complex_mul(x[1], twiddle);
+
+#pragma clang loop unroll(full)
+  for (int t = 2; t < radix; t++) {
+    twiddle = complex_mul(twiddle, twiddle_1);
+    x[t] = complex_mul(x[t], twiddle);
+  }
+
+  radix_func(x, y);
+
+#pragma clang loop unroll(full)
+  for (int t = 0; t < radix; t++) {
+    indices[t] = j + t * p;
+  }
+}
+
+// Radix kernels
+void radix2(thread float2* x, thread float2* y) {
+  y[0] = x[0] + x[1];
+  y[1] = x[0] - x[1];
+}
+
+void radix3(thread float2* x, thread float2* y) {
+  float pi_2_3 = -0.8660254037844387;
+
+  float2 a_1 = x[1] + x[2];
+  float2 a_2 = x[1] - x[2];
+
+  y[0] = x[0] + a_1;
+  float2 b_1 = x[0] - 0.5 * a_1;
+  float2 b_2 = pi_2_3 * a_2;
+
+  float2 b_2_j = {-b_2.y, b_2.x};
+  y[1] = b_1 + b_2_j;
+  y[2] = b_1 - b_2_j;
+}
+
+void radix4(thread float2* x, thread float2* y) {
+  float2 minus_i = {0, -1};
+
+  float2 z_0 = x[0] + x[2];
+  float2 z_1 = x[0] - x[2];
+  float2 z_2 = x[1] + x[3];
+  float2 z_3 = complex_mul(x[1] - x[3], minus_i);
+
+  y[0] = z_0 + z_2;
+  y[1] = z_1 + z_3;
+  y[2] = z_0 - z_2;
+  y[3] = z_1 - z_3;
+}
+
+void radix6(thread float2* x, thread float2* y) {
+  float2 w_1 = {0.5, -0.8660254037844387};
+  float2 w_2 = {-0.5, -0.8660254037844387};
+  // If we have a radix 6, radix 7 is pretty easy
+  float2 in1[3] = {x[0], x[2], x[4]};
+  float2 in2[3] = {x[1], x[3], x[5]};
+  radix3(in1, y);
+  radix3(in2, y + 3);
+
+  float2 in4[2] = {y[0], y[3]};
+  float2 in5[2] = {y[1], complex_mul(y[4], w_1)};
+  float2 in6[2] = {y[2], complex_mul(y[5], w_2)};
+  radix2(in4, x);
+  radix2(in5, x + 2);
+  radix2(in6, x + 4);
+  y[0] = x[0];
+  y[3] = x[1];
+  y[1] = x[2];
+  y[4] = x[3];
+  y[2] = x[4];
+  y[5] = x[5];
+}
+
+void radix7(thread float2* x, thread float2* y) {
+  float2 b_q[6] = {
+      {-1., 0},
+      {2.44013336, -1.02261879},
+      {2.37046941, -1.17510629},
+      {0, -2.64575131},
+      {2.37046941, 1.17510629},
+      {-2.44013336, -1.02261879}};
+
+  float2 in1[6] = {x[1], x[3], x[2], x[6], x[4], x[5]};
+  radix6(in1, y + 1);
+  float2 x_sum = y[1];
+  // Now it's time to multiply by b_q
+
+  float2 conj = {1, -1};
+  float2 inv = {1 / 6.0, -1 / 6.0};
+
+#pragma clang loop unroll(full)
+  for (int t = 0; t < 6; t++) {
+    y[t + 1] = complex_mul(y[t + 1], b_q[t]) * conj;
+  }
+
+  radix6(y + 1, x + 1);
+  y[0] = x_sum + x[0];
+  y[1] = x[1] * inv + x[0];
+  y[5] = x[2] * inv + x[0];
+  y[4] = x[3] * inv + x[0];
+  y[6] = x[4] * inv + x[0];
+  y[2] = x[5] * inv + x[0];
+  y[3] = x[6] * inv + x[0];
+}
+
+void radix8(thread float2* x, thread float2* y) {
+  float cos_pi_4 = 0.7071067811865476;
+  // first reorder the inputs
+  y[0] = x[0];
+  y[1] = x[2];
+  y[2] = x[4];
+  y[3] = x[6];
+  y[4] = x[1];
+  y[5] = x[3];
+  y[6] = x[5];
+  y[7] = x[7];
+  radix4(y, x);
+  radix4(y + 4, x + 4);
+}
 
 template <int radix, RadixFunc radix_func>
 void radix_n_step(
@@ -67,13 +213,15 @@ void radix_n_step(
       int index = i + t * m;
       if (index < m_r) {
         for (int r = 0; r < radix; r++) {
-          if (s == 0 && first_rader_ == 0) {
+          // if (s == 0 && first_rader_ == 0 && radix == first_radix_) {
+          if (s == 0 && true) {
             inputs[r] = in[batch_idx + index + r * m_r];
           } else {
             inputs[r] = read_buf[index + r * m_r];
           }
         }
-        radix_func(index, *p, inputs, indices + t * radix, values + t * radix);
+        radix_n<radix, radix_func>(
+            index, *p, inputs, indices + t * radix, values + t * radix);
       }
     }
 
@@ -85,7 +233,8 @@ void radix_n_step(
       if (index < m_r) {
         for (int r = 0; r < radix; r++) {
           int r_index = t * radix + r;
-          if (s == num_steps - 1 && last_radix_ == radix) {
+          // if (s == num_steps - 1 && radix == last_radix_) {
+          if (s == num_steps - 1 && true) {
             out[batch_idx + indices[r_index]] = values[r_index];
           } else {
             read_buf[indices[r_index]] = values[r_index];
@@ -138,7 +287,8 @@ void rader_n_step_forward(
             inputs[r] = read_buf[rader_m + m_index];
           }
         }
-        radix_func(index, *p, inputs, indices + t * radix, values + t * radix);
+        radix_n<radix, radix_func>(
+            index, *p, inputs, indices + t * radix, values + t * radix);
       }
     }
 
@@ -207,7 +357,8 @@ void rader_n_step_backward(
             inputs[r] = read_buf[rader_m + m_index];
           }
         }
-        radix_func(index, *p, inputs, indices + t * radix, values + t * radix);
+        radix_n<radix, radix_func>(
+            index, *p, inputs, indices + t * radix, values + t * radix);
       }
     }
 
@@ -277,146 +428,6 @@ void rader_n_step_backward(
   }
 }
 
-float2 get_twiddle(int k, int p) {
-  float theta = -2.0f * k * M_PI_F / p;
-
-  float2 twiddle = {metal::fast::cos(theta), metal::fast::sin(theta)};
-  return twiddle;
-}
-
-void radix2(
-    int i,
-    int p,
-    thread float2* inputs,
-    thread int* indices,
-    thread float2* values) {
-  // i: the index in the overall DFT that we're processing.
-  // p: the size of the DFTs we're merging at this step.
-  // m: how many threads are working on this DFT.
-
-  float2 x_0 = inputs[0];
-  float2 x_1 = inputs[1];
-
-  // The index within this sub-DFT
-  // int k = i & (p - 1);
-  int k = i % p;
-
-  float2 twiddle = get_twiddle(k, 2 * p);
-
-  float2 z = complex_mul(x_1, twiddle);
-
-  float2 y_0 = x_0 + z;
-  float2 y_1 = x_0 - z;
-
-  // int j = (i << 1) - k;
-  int j = (i / p) * 2 * p + k;
-
-  indices[0] = j;
-  indices[1] = j + p;
-  values[0] = y_0;
-  values[1] = y_1;
-}
-
-void radix3(
-    int i,
-    int p,
-    thread float2* inputs,
-    thread int* indices,
-    thread float2* values) {
-  float pi_2_3 = -0.8660254037844387;
-
-  float2 x_0 = inputs[0];
-  float2 x_1 = inputs[1];
-  float2 x_2 = inputs[2];
-
-  int k = i % p;
-  int j = (i / p) * 3 * p + k;
-
-  float2 twiddle_1 = get_twiddle(k, 3 * p);
-  float2 twiddle_2 = complex_mul(twiddle_1, twiddle_1);
-
-  x_1 = complex_mul(x_1, twiddle_1);
-  x_2 = complex_mul(x_2, twiddle_2);
-
-  float2 a_1 = x_1 + x_2;
-  float2 a_2 = x_1 - x_2;
-
-  float2 y_0 = x_0 + a_1;
-  float2 b_1 = x_0 - 0.5 * a_1;
-  float2 b_2 = pi_2_3 * a_2;
-
-  float2 b_2_j = {-b_2.y, b_2.x};
-  float2 y_1 = b_1 + b_2_j;
-  float2 y_2 = b_1 - b_2_j;
-
-  indices[0] = j;
-  indices[1] = j + p;
-  indices[2] = j + 2 * p;
-  values[0] = y_0;
-  values[1] = y_1;
-  values[2] = y_2;
-}
-
-void radix4(
-    int i,
-    int p,
-    thread float2* inputs,
-    thread int* indices,
-    thread float2* values) {
-  float2 x_0 = inputs[0];
-  float2 x_1 = inputs[1];
-  float2 x_2 = inputs[2];
-  float2 x_3 = inputs[3];
-
-  // We use faster bit shifting ops when n is a power of 2
-  int k;
-  if (is_power_of_2_) {
-    k = i & (p - 1);
-  } else {
-    k = i % p;
-  }
-
-  if (p > 1) {
-    float2 twiddle = get_twiddle(k, 4 * p);
-    // e^a * e^b = e^(a + b)
-    float2 twiddle_2 = complex_mul(twiddle, twiddle);
-    float2 twiddle_3 = complex_mul(twiddle, twiddle_2);
-
-    x_1 = complex_mul(x_1, twiddle);
-    x_2 = complex_mul(x_2, twiddle_2);
-    x_3 = complex_mul(x_3, twiddle_3);
-  }
-
-  float2 minus_i = {0, -1};
-
-  // Hard coded twiddle factors for DFT4
-  float2 z_0 = x_0 + x_2;
-  float2 z_1 = x_0 - x_2;
-  float2 z_2 = x_1 + x_3;
-  float2 z_3 = complex_mul(x_1 - x_3, minus_i);
-
-  float2 y_0 = z_0 + z_2;
-  float2 y_1 = z_1 + z_3;
-  float2 y_2 = z_0 - z_2;
-  float2 y_3 = z_1 - z_3;
-
-  int j;
-  if (is_power_of_2_) {
-    j = ((i - k) << 2) + k;
-  } else {
-    j = (i / p) * 4 * p + k;
-  }
-
-  indices[0] = j;
-  indices[1] = j + p;
-  indices[2] = j + 2 * p;
-  indices[3] = j + 3 * p;
-  values[0] = y_0;
-  values[1] = y_1;
-  values[2] = y_2;
-  values[3] = y_3;
-}
-
 void radix5(
     int i,
     int p,
@@ -469,66 +480,6 @@ void radix5(
   values[4] = y_4;
 }
 
-void radix7(
-    int i,
-    int p,
-    thread float2* inputs,
-    thread int* indices,
-    thread float2* values) {
-  float2 w_1 = {0.6234898018587336, -0.7818314824680298};
-  float2 w_2 = {-0.22252093395631434, -0.9749279121818236};
-  float2 w_3 = {-0.900968867902419, -0.43388373911755823};
-  float2 w_4 = {-0.9009688679024191, 0.433883739117558};
-  float2 w_5 = {-0.2225209339563146, 0.9749279121818236};
-  float2 w_6 = {0.6234898018587334, 0.7818314824680299};
-
-  thread float2* x = inputs;
-  thread float2* y = values;
-
-  int k = i % p;
-  int j = (i / p) * 7 * p + k;
-
-  float2 twiddle_1 = get_twiddle(k, 7 * p);
-  float2 twiddle = twiddle_1;
-  x[1] = complex_mul(x[1], twiddle);
-
-#pragma clang loop unroll(full)
-  for (int t = 2; t < 7; t++) {
-    twiddle = complex_mul(twiddle, twiddle_1);
-    x[t] = complex_mul(x[t], twiddle);
-  }
-
-  y[0] = x[0] + x[1] + x[2] + x[3] + x[4] + x[5] + x[6];
-  y[1] = x[0] + complex_mul(x[1], w_1) + complex_mul(x[2], w_2) +
-      complex_mul(x[3], w_3) + complex_mul(x[4], w_4) + complex_mul(x[5], w_5) +
-      complex_mul(x[6], w_6);
-  y[2] = x[0] + complex_mul(x[1], w_2) + complex_mul(x[2], w_4) +
-      complex_mul(x[3], w_6) + complex_mul(x[4], w_1) + complex_mul(x[5], w_3) +
-      complex_mul(x[6], w_5);
-  y[3] = x[0] + complex_mul(x[1], w_3) + complex_mul(x[2], w_6) +
-      complex_mul(x[3], w_2) + complex_mul(x[4], w_5) + complex_mul(x[5], w_1) +
-      complex_mul(x[6], w_4);
-  y[4] = x[0] + complex_mul(x[1], w_4) + complex_mul(x[2], w_1) +
-      complex_mul(x[3], w_5) + complex_mul(x[4], w_2) + complex_mul(x[5], w_6) +
-      complex_mul(x[6], w_3);
-  y[5] = x[0] + complex_mul(x[1], w_5) + complex_mul(x[2], w_3) +
-      complex_mul(x[3], w_1) + complex_mul(x[4], w_6) + complex_mul(x[5], w_4) +
-      complex_mul(x[6], w_2);
-  y[6] = x[0] + complex_mul(x[1], w_6) + complex_mul(x[2], w_5) +
-      complex_mul(x[3], w_4) + complex_mul(x[4], w_3) + complex_mul(x[5], w_2) +
-      complex_mul(x[6], w_1);
-
-#pragma clang loop unroll(full)
-  for (int t = 0; t < 7; t++) {
-    indices[t] = j + t * p;
-  }
-}
-
-// void radix8(int i, int p, thread float2* inputs, thread int* indices, thread
-// float2* values) {
-//   // plan is a radix 2 and a radix 8
-// }
-
 // Each FFT is computed entirely in shared GPU memory.
 //
 // N is decomposed into radix-n DFTs:
@@ -566,145 +517,148 @@ template <int tg_mem_size>
   int rader_m = n / rader_n;
 
   int p = 1;
-  rader_n_step_forward<2, radix2>(
-      i,
-      &p,
-      m,
-      rader_m,
-      n,
-      batch_idx,
-      rader_2_steps_,
-      read_buf,
-      in,
-      out,
-      raders_g_q,
-      raders_b_q);
-  rader_n_step_forward<3, radix3>(
-      i,
-      &p,
-      m,
-      rader_m,
-      n,
-      batch_idx,
-      rader_3_steps_,
-      read_buf,
-      in,
-      out,
-      raders_g_q,
-      raders_b_q);
-  rader_n_step_forward<4, radix4>(
-      i,
-      &p,
-      m,
-      rader_m,
-      n,
-      batch_idx,
-      rader_4_steps_,
-      read_buf,
-      in,
-      out,
-      raders_g_q,
-      raders_b_q);
-  rader_n_step_forward<5, radix5>(
-      i,
-      &p,
-      m,
-      rader_m,
-      n,
-      batch_idx,
-      rader_5_steps_,
-      read_buf,
-      in,
-      out,
-      raders_g_q,
-      raders_b_q);
-  rader_n_step_forward<7, radix7>(
-      i,
-      &p,
-      m,
-      rader_m,
-      n,
-      batch_idx,
-      rader_7_steps_,
-      read_buf,
-      in,
-      out,
-      raders_g_q,
-      raders_b_q);
+  // rader_n_step_forward<2, radix2>(
+  //     i,
+  //     &p,
+  //     m,
+  //     rader_m,
+  //     n,
+  //     batch_idx,
+  //     rader_2_steps_,
+  //     read_buf,
+  //     in,
+  //     out,
+  //     raders_g_q,
+  //     raders_b_q);
+  // rader_n_step_forward<3, radix3>(
+  //     i,
+  //     &p,
+  //     m,
+  //     rader_m,
+  //     n,
+  //     batch_idx,
+  //     rader_3_steps_,
+  //     read_buf,
+  //     in,
+  //     out,
+  //     raders_g_q,
+  //     raders_b_q);
+  // rader_n_step_forward<4, radix4>(
+  //     i,
+  //     &p,
+  //     m,
+  //     rader_m,
+  //     n,
+  //     batch_idx,
+  //     rader_4_steps_,
+  //     read_buf,
+  //     in,
+  //     out,
+  //     raders_g_q,
+  //     raders_b_q);
+  // rader_n_step_forward<5, radix5>(
+  //     i,
+  //     &p,
+  //     m,
+  //     rader_m,
+  //     n,
+  //     batch_idx,
+  //     rader_5_steps_,
+  //     read_buf,
+  //     in,
+  //     out,
+  //     raders_g_q,
+  //     raders_b_q);
+  // rader_n_step_forward<7, radix7>(
+  //     i,
+  //     &p,
+  //     m,
+  //     rader_m,
+  //     n,
+  //     batch_idx,
+  //     rader_7_steps_,
+  //     read_buf,
+  //     in,
+  //     out,
+  //     raders_g_q,
+  //     raders_b_q);
 
-  p = 1;
-  rader_n_step_backward<2, radix2>(
-      i,
-      &p,
-      m,
-      rader_m,
-      n,
-      batch_idx,
-      rader_2_steps_,
-      read_buf,
-      in,
-      out,
-      raders_g_minus_q);
-  rader_n_step_backward<3, radix3>(
-      i,
-      &p,
-      m,
-      rader_m,
-      n,
-      batch_idx,
-      rader_3_steps_,
-      read_buf,
-      in,
-      out,
-      raders_g_minus_q);
-  rader_n_step_backward<4, radix4>(
-      i,
-      &p,
-      m,
-      rader_m,
-      n,
-      batch_idx,
-      rader_4_steps_,
-      read_buf,
-      in,
-      out,
-      raders_g_minus_q);
-  rader_n_step_backward<5, radix5>(
-      i,
-      &p,
-      m,
-      rader_m,
-      n,
-      batch_idx,
-      rader_5_steps_,
-      read_buf,
-      in,
-      out,
-      raders_g_minus_q);
-  rader_n_step_backward<7, radix7>(
-      i,
-      &p,
-      m,
-      rader_m,
-      n,
-      batch_idx,
-      rader_7_steps_,
-      read_buf,
-      in,
-      out,
-      raders_g_minus_q);
+  // p = 1;
+  // rader_n_step_backward<2, radix2>(
+  //     i,
+  //     &p,
+  //     m,
+  //     rader_m,
+  //     n,
+  //     batch_idx,
+  //     rader_2_steps_,
+  //     read_buf,
+  //     in,
+  //     out,
+  //     raders_g_minus_q);
+  // rader_n_step_backward<3, radix3>(
+  //     i,
+  //     &p,
+  //     m,
+  //     rader_m,
+  //     n,
+  //     batch_idx,
+  //     rader_3_steps_,
+  //     read_buf,
+  //     in,
+  //     out,
+  //     raders_g_minus_q);
+  // rader_n_step_backward<4, radix4>(
+  //     i,
+  //     &p,
+  //     m,
+  //     rader_m,
+  //     n,
+  //     batch_idx,
+  //     rader_4_steps_,
+  //     read_buf,
+  //     in,
+  //     out,
+  //     raders_g_minus_q);
+  // rader_n_step_backward<5, radix5>(
+  //     i,
+  //     &p,
+  //     m,
+  //     rader_m,
+  //     n,
+  //     batch_idx,
+  //     rader_5_steps_,
+  //     read_buf,
+  //     in,
+  //     out,
+  //     raders_g_minus_q);
+  // rader_n_step_backward<7, radix7>(
+  //     i,
+  //     &p,
+  //     m,
+  //     rader_m,
+  //     n,
+  //     batch_idx,
+  //     rader_7_steps_,
+  //     read_buf,
+  //     in,
+  //     out,
+  //     raders_g_minus_q);
 
   p = rader_n;
-  radix_n_step<2, radix2>(
-      i, &p, m, n, batch_idx, radix_2_steps_, read_buf, in, out);
-  radix_n_step<3, radix3>(
-      i, &p, m, n, batch_idx, radix_3_steps_, read_buf, in, out);
-  radix_n_step<4, radix4>(
-      i, &p, m, n, batch_idx, radix_4_steps_, read_buf, in, out);
-  radix_n_step<5, radix5>(
-      i, &p, m, n, batch_idx, radix_5_steps_, read_buf, in, out);
-  radix_n_step<7, radix7>(
-      i, &p, m, n, batch_idx, radix_7_steps_, read_buf, in, out);
+  // radix_n_step<2, radix2>(
+  //     i, &p, m, n, batch_idx, radix_2_steps_, read_buf, in, out);
+  // radix_n_step<3, radix3>(
+  //     i, &p, m, n, batch_idx, radix_3_steps_, read_buf, in, out);
+  // radix_n_step<4, radix4>(
+  //     i, &p, m, n, batch_idx, radix_4_steps_, read_buf, in, out);
+  // radix_n_step<6, radix6>(
+  //     i, &p, m, n, batch_idx, 1, read_buf, in, out);
+  radix_n_step<7, radix7>(i, &p, m, n, batch_idx, 2, read_buf, in, out);
+  // radix_n_step<5, radix5>(
+  //     i, &p, m, n, batch_idx, radix_5_steps_, read_buf, in, out);
+  // radix_n_step<7, radix7>(
+  //     i, &p, m, n, batch_idx, radix_7_steps_, read_buf, in, out);
 }
 
 template <int tg_mem_size>
