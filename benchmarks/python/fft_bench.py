@@ -58,8 +58,8 @@ def run_bench_mps(system_size, fft_sizes):
 
 
 def time_fft():
-    x = range(17, 18)
-    system_size = int(2**24)
+    x = range(2, 256)
+    system_size = int(2**26)
 
     with mx.stream(mx.gpu):
         gpu_bandwidths = run_bench(system_size=system_size, fft_sizes=x)

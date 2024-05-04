@@ -959,7 +959,7 @@ class FFT : public UnaryPrimitive {
   static FFTPlan plan_fft(int n);
   inline static const std::vector<int> supported_radices() {
     // Ordered by preference in decomposition.
-    return {7, 5, 4, 3, 2};
+    return {13, 11, 7, 5, 4, 3, 2};
   }
 
  private:
