@@ -13,34 +13,33 @@
 
 using namespace metal;
 
-// In the worst case we hae 13 elems per thread
 #define MAX_OUTPUT_SIZE 22
+#define MAX_ELEMS_PER_THREAD 13
 
 // Specialize for a particular value of N at runtime
 constant bool inv_ [[function_constant(0)]];
 constant bool is_power_of_2_ [[function_constant(1)]];
 constant int elems_per_thread_ [[function_constant(2)]];
 // Signal which radices we need to read/write to global memory on
-constant int first_radix_ [[function_constant(3)]];
-constant int last_radix_ [[function_constant(4)]];
-constant int first_rader_ [[function_constant(5)]];
-constant int last_rader_ [[function_constant(6)]];
+constant bool is_rader_ [[function_constant(3)]];
 // Stockham steps
-constant int radix_13_steps_ [[function_constant(7)]];
-constant int radix_11_steps_ [[function_constant(8)]];
-constant int radix_7_steps_ [[function_constant(9)]];
-constant int radix_5_steps_ [[function_constant(10)]];
-constant int radix_4_steps_ [[function_constant(11)]];
-constant int radix_3_steps_ [[function_constant(12)]];
-constant int radix_2_steps_ [[function_constant(13)]];
+constant int radix_13_steps_ [[function_constant(4)]];
+constant int radix_11_steps_ [[function_constant(5)]];
+constant int radix_8_steps_ [[function_constant(6)]];
+constant int radix_7_steps_ [[function_constant(7)]];
+constant int radix_5_steps_ [[function_constant(8)]];
+constant int radix_4_steps_ [[function_constant(9)]];
+constant int radix_3_steps_ [[function_constant(10)]];
+constant int radix_2_steps_ [[function_constant(11)]];
 // Rader steps
-constant int rader_13_steps_ [[function_constant(14)]];
-constant int rader_11_steps_ [[function_constant(15)]];
-constant int rader_7_steps_ [[function_constant(16)]];
-constant int rader_5_steps_ [[function_constant(17)]];
-constant int rader_4_steps_ [[function_constant(18)]];
-constant int rader_3_steps_ [[function_constant(19)]];
-constant int rader_2_steps_ [[function_constant(20)]];
+constant int rader_13_steps_ [[function_constant(12)]];
+constant int rader_11_steps_ [[function_constant(13)]];
+constant int rader_8_steps_ [[function_constant(14)]];
+constant int rader_7_steps_ [[function_constant(15)]];
+constant int rader_5_steps_ [[function_constant(16)]];
+constant int rader_4_steps_ [[function_constant(17)]];
+constant int rader_3_steps_ [[function_constant(18)]];
+constant int rader_2_steps_ [[function_constant(19)]];
 
 float2 complex_mul(float2 a, float2 b) {
   float2 c = {a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x};
@@ -67,10 +66,18 @@ void radix_n(
   // p: the size of the DFTs we're merging at this step.
   // m: how many threads are working on this DFT.
 
-  int k = i % p;
-  // int k = i & (p - 1);
-  int j = (i / p) * radix * p + k;
-  // int j = ((i - k) << 2) + k;
+  int k, j;
+
+  // Use faster bitwise operations when working with powers of two
+  constexpr bool radix_p_2 = (radix & (radix - 1)) == 0;
+  if (radix_p_2 && is_power_of_2_) {
+    constexpr int power = __builtin_ctz(radix);
+    k = i & (p - 1);
+    j = ((i - k) << power) + k;
+  } else {
+    k = i % p;
+    j = (i / p) * radix * p + k;
+  }
 
   // Apply twiddles based on where in the decomposition we are
   if (p > 1) {
@@ -96,10 +103,10 @@ void radix_n(
 // Radix kernels
 //
 // We provide optimized, single threaded Radix codelets
-// for n=2,3,4,5,6,7,10,11,12,13.
+// for n=2,3,4,5,6,7,8,10,11,12,13.
 //
 // For n=2,3,4,5,6 we hand write the codelets.
-// For n=10,12 we combine radix2 and radix5/6 codelets.
+// For n=8,10,12 we combine smaller codelets.
 // For n=7,11,13 we use Rader's algorithm which decomposes
 // them into (n-1)=6,10,12 codelets.
 
@@ -124,17 +131,16 @@ void radix3(thread float2* x, thread float2* y) {
 }
 
 void radix4(thread float2* x, thread float2* y) {
-  float2 minus_i = {0, -1};
-
   float2 z_0 = x[0] + x[2];
   float2 z_1 = x[0] - x[2];
   float2 z_2 = x[1] + x[3];
-  float2 z_3 = complex_mul(x[1] - x[3], minus_i);
+  float2 z_3 = x[1] - x[3];
+  float2 z_3_i = {z_3.y, -z_3.x};
 
   y[0] = z_0 + z_2;
-  y[1] = z_1 + z_3;
+  y[1] = z_1 + z_3_i;
   y[2] = z_0 - z_2;
-  y[3] = z_1 - z_3;
+  y[3] = z_1 - z_3_i;
 }
 
 void radix5(thread float2* x, thread float2* y) {
@@ -223,9 +229,26 @@ void radix7(thread float2* x, thread float2* y) {
   }
 }
 
-// void radix8(thread float2* x, thread float2* y) {
-//   float cos_pi_4 = 0.7071067811865476;
-// }
+void radix8(thread float2* x, thread float2* y) {
+  float cos_pi_4 = 0.7071067811865476;
+  float2 w_0 = {cos_pi_4, -cos_pi_4};
+  float2 w_1 = {-cos_pi_4, -cos_pi_4};
+  float2 temp[8] = {x[0], x[2], x[4], x[6], x[1], x[3], x[5], x[7]};
+  radix4(temp, x);
+  radix4(temp + 4, x + 4);
+
+  y[0] = x[0] + x[4];
+  y[4] = x[0] - x[4];
+  float2 x_5 = complex_mul(x[5], w_0);
+  y[1] = x[1] + x_5;
+  y[5] = x[1] - x_5;
+  float2 x_6 = {x[6].y, -x[6].x};
+  y[2] = x[2] + x_6;
+  y[6] = x[2] - x_6;
+  float2 x_7 = complex_mul(x[7], w_1);
+  y[3] = x[3] + x_7;
+  y[7] = x[3] - x_7;
+}
 
 void radix10(thread float2* x, thread float2* y) {
   float2 w[4];
@@ -365,11 +388,8 @@ void radix_n_step(
     thread int* p,
     int m,
     int n,
-    int batch_idx,
     int num_steps,
-    threadgroup float2* read_buf,
-    const device float2* in,
-    device float2* out) {
+    threadgroup float2* read_buf) {
   // Thread local memory for inputs and outputs to the radix codelet
   float2 inputs[radix];
   int indices[MAX_OUTPUT_SIZE];
@@ -383,11 +403,7 @@ void radix_n_step(
       int index = i + t * m;
       if (index < m_r) {
         for (int r = 0; r < radix; r++) {
-          if (s == 0 && first_rader_ == 0 && radix == first_radix_) {
-            inputs[r] = in[batch_idx + index + r * m_r];
-          } else {
-            inputs[r] = read_buf[index + r * m_r];
-          }
+          inputs[r] = read_buf[index + r * m_r];
         }
         radix_n<radix, radix_func>(
             index, *p, inputs, indices + t * radix, values + t * radix);
@@ -402,11 +418,7 @@ void radix_n_step(
       if (index < m_r) {
         for (int r = 0; r < radix; r++) {
           int r_index = t * radix + r;
-          if (s == num_steps - 1 && radix == last_radix_) {
-            out[batch_idx + indices[r_index]] = values[r_index];
-          } else {
-            read_buf[indices[r_index]] = values[r_index];
-          }
+          read_buf[indices[r_index]] = values[r_index];
         }
       }
     }
@@ -417,217 +429,32 @@ void radix_n_step(
   }
 }
 
-template <int radix, RadixFunc radix_func>
-void rader_n_step_forward(
-    int i,
-    thread int* p,
-    int m,
-    int rader_m,
-    int n,
-    int batch_idx,
-    int num_steps,
-    threadgroup float2* read_buf,
-    const device float2* in,
-    device float2* out,
-    const device short* raders_g_q,
-    const device float2* raders_b_q) {
-  // Thread local memory for inputs and outputs to the radix codelet
-  float2 inputs[radix];
-  int indices[MAX_OUTPUT_SIZE];
-  float2 values[MAX_OUTPUT_SIZE];
-
-  float2 inv = {1.0f, -1.0f};
-  int m_r = (n - rader_m) / radix;
-  int rader_n = n / rader_m;
-  int max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
-  for (int s = 0; s < num_steps; s++) {
-    for (int t = 0; t < max_radices_per_thread; t++) {
-      int index = i + t * m;
-      if (index < m_r) {
-        for (int r = 0; r < radix; r++) {
-          int m_index = index + r * m_r;
-          if (s == 0 && first_rader_ == radix) {
-            /* Rader permutation for the input */
-            short g_q = raders_g_q[m_index / rader_m];
-            inputs[r] =
-                in[batch_idx + rader_m + (g_q - 1) * rader_m + index % rader_m];
-          } else {
-            inputs[r] = read_buf[rader_m + m_index];
-          }
-        }
-        radix_n<radix, radix_func>(
-            index, *p, inputs, indices + t * radix, values + t * radix);
-      }
-    }
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    for (int t = 0; t < max_radices_per_thread; t++) {
-      int index = i + t * m;
-      if (index < m_r) {
-        for (int r = 0; r < radix; r++) {
-          int r_index = r + t * radix;
-          if (s == num_steps - 1 && last_rader_ == radix) {
-            read_buf[rader_m + indices[r_index]] =
-                complex_mul(
-                    values[r_index],
-                    raders_b_q[indices[r_index] % (rader_n - 1)]) *
-                inv;
-            // Fill in x_0
-            if (indices[r_index] % (rader_n - 1) == 0) {
-              read_buf[indices[r_index] / (rader_n - 1)] = values[r_index];
-            }
-          } else {
-            read_buf[rader_m + indices[r_index]] = values[r_index];
-          }
-        }
-      }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    *p *= radix;
-  }
-}
-
-template <int radix, RadixFunc radix_func>
-void rader_n_step_backward(
-    int i,
-    thread int* p,
-    int m,
-    int rader_m,
-    int n,
-    int batch_idx,
-    int num_steps,
-    threadgroup float2* read_buf,
-    const device float2* in,
-    device float2* out,
-    const device short* raders_g_minus_q) {
-  // Thread local memory for inputs and outputs to the radix codelet
-  float2 inputs[radix];
-  int indices[MAX_OUTPUT_SIZE];
-  float2 values[MAX_OUTPUT_SIZE];
-
-  int m_r = (n - rader_m) / radix;
-  int rader_n = n / rader_m;
-  float2 inv_factor = {1.0f / (rader_n - 1), -1.0f / (rader_n - 1)};
-  int max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
-  for (int s = 0; s < num_steps; s++) {
-    for (int t = 0; t < max_radices_per_thread; t++) {
-      int index = i + t * m;
-      if (index < m_r) {
-        for (int r = 0; r < radix; r++) {
-          int m_index = index + r * m_r;
-          if (s == 0 && first_rader_ == radix) {
-            // We get the data uninterleaved from the output of the forward FFT
-            inputs[r] = read_buf
-                [rader_m + m_index / rader_m +
-                 (m_index % rader_m) * (rader_n - 1)];
-          } else {
-            inputs[r] = read_buf[rader_m + m_index];
-          }
-        }
-        radix_n<radix, radix_func>(
-            index, *p, inputs, indices + t * radix, values + t * radix);
-      }
-    }
-
-    bool last_step = s == num_steps - 1 && last_rader_ == radix;
-    float2 x_sum[13];
-
-    if (last_step) {
-      for (int t = 0; t < max_radices_per_thread; t++) {
-        int index = i + t * m;
-        for (int e = 0; e < elems_per_thread_; e++) {
-          int e_index = index * elems_per_thread_ + e;
-          if (e_index < rader_m) {
-            x_sum[e] = read_buf[e_index] + in[batch_idx + e_index];
-          }
-        }
-      }
-    }
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    for (int t = 0; t < max_radices_per_thread; t++) {
-      int index = i + t * m;
-      if (index < m_r) {
-        for (int r = 0; r < radix; r++) {
-          int r_index = r + t * radix;
-          if (last_step) {
-            // Rader permutation for the output
-            int g_q_index = indices[r_index] % (rader_n - 1);
-            short g_q = raders_g_minus_q[g_q_index];
-            // we've been doing the rader's n - 1 fft/ifft like this:
-            // _ _ x x x x x x x x
-            // we need to rearrange to this so we can go straight into normal
-            // radix steps: _ x x x x _ x x x x
-            int out_index = indices[r_index] - g_q_index + g_q +
-                (indices[r_index] / (rader_n - 1));
-            float2 x_0 = in[batch_idx + out_index / rader_n];
-            if (last_radix_ == 0) {
-              out[batch_idx + out_index] = values[r_index] * inv_factor + x_0;
-            } else {
-              read_buf[out_index] = values[r_index] * inv_factor + x_0;
-            }
-          } else {
-            read_buf[rader_m + indices[r_index]] = values[r_index];
-          }
-        }
-      }
-    }
-
-    if (last_step) {
-      for (int t = 0; t < max_radices_per_thread; t++) {
-        int index = i + t * m;
-        for (int e = 0; e < elems_per_thread_; e++) {
-          int e_index = index * elems_per_thread_ + e;
-          if (e_index < rader_m) {
-            if (last_radix_ == 0) {
-              out[batch_idx + e_index * rader_n] = x_sum[e];
-            } else {
-              read_buf[e_index * rader_n] = x_sum[e];
-            }
-          }
-        }
-      }
-    }
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    *p *= radix;
-  }
-}
-
 #define RADIX_STEP(radix, radix_func, num_steps) \
+  radix_n_step<radix, radix_func>(i, &p, m, n, num_steps, read_buf);
+
+#define RADER_STEP(radix, radix_func, num_steps) \
   radix_n_step<radix, radix_func>(               \
-      i, &p, m, n, batch_idx, num_steps, read_buf, in, out);
+      i, &p, m, n - rader_m, num_steps, read_buf + rader_m);
 
-#define RADER_FORWARD_STEP(radix, radix_func, num_steps) \
-  rader_n_step_forward<radix, radix_func>(               \
-      i,                                                 \
-      &p,                                                \
-      m,                                                 \
-      rader_m,                                           \
-      n,                                                 \
-      batch_idx,                                         \
-      num_steps,                                         \
-      read_buf,                                          \
-      in,                                                \
-      out,                                               \
-      raders_g_q,                                        \
-      raders_b_q);
+#define RADIX_STEPS()                       \
+  RADIX_STEP(2, radix2, radix_2_steps_);    \
+  RADIX_STEP(3, radix3, radix_3_steps_);    \
+  RADIX_STEP(4, radix4, radix_4_steps_);    \
+  RADIX_STEP(5, radix5, radix_5_steps_);    \
+  RADIX_STEP(7, radix7, radix_7_steps_);    \
+  RADIX_STEP(8, radix8, radix_8_steps_);    \
+  RADIX_STEP(11, radix11, radix_11_steps_); \
+  RADIX_STEP(13, radix13, radix_13_steps_);
 
-#define RADER_BACKWARD_STEP(radix, radix_func, num_steps) \
-  rader_n_step_backward<radix, radix_func>(               \
-      i,                                                  \
-      &p,                                                 \
-      m,                                                  \
-      rader_m,                                            \
-      n,                                                  \
-      batch_idx,                                          \
-      num_steps,                                          \
-      read_buf,                                           \
-      in,                                                 \
-      out,                                                \
-      raders_g_minus_q);
+#define RADER_STEPS()                       \
+  RADER_STEP(2, radix2, rader_2_steps_);    \
+  RADER_STEP(3, radix3, rader_3_steps_);    \
+  RADER_STEP(4, radix4, rader_4_steps_);    \
+  RADER_STEP(5, radix5, rader_5_steps_);    \
+  RADER_STEP(7, radix7, rader_7_steps_);    \
+  RADER_STEP(8, radix8, rader_8_steps_);    \
+  RADER_STEP(11, radix11, rader_11_steps_); \
+  RADER_STEP(13, radix13, rader_13_steps_);
 
 // Each FFT is computed entirely in shared GPU memory.
 //
@@ -661,34 +488,96 @@ template <int tg_mem_size>
     return;
   }
 
-  int rader_m = n / rader_n;
-
   int p = 1;
-  RADER_FORWARD_STEP(2, radix2, rader_2_steps_);
-  RADER_FORWARD_STEP(3, radix3, rader_3_steps_);
-  RADER_FORWARD_STEP(4, radix4, rader_4_steps_);
-  RADER_FORWARD_STEP(5, radix5, rader_5_steps_);
-  RADER_FORWARD_STEP(7, radix7, rader_7_steps_);
-  RADER_FORWARD_STEP(11, radix11, rader_11_steps_);
-  RADER_FORWARD_STEP(13, radix13, rader_13_steps_);
 
-  p = 1;
-  RADER_BACKWARD_STEP(2, radix2, rader_2_steps_);
-  RADER_BACKWARD_STEP(3, radix3, rader_3_steps_);
-  RADER_BACKWARD_STEP(4, radix4, rader_4_steps_);
-  RADER_BACKWARD_STEP(5, radix5, rader_5_steps_);
-  RADER_BACKWARD_STEP(7, radix7, rader_7_steps_);
-  RADER_BACKWARD_STEP(11, radix11, rader_11_steps_);
-  RADER_BACKWARD_STEP(13, radix13, rader_13_steps_);
+  if (is_rader_) {
+    int rader_m = n / rader_n;
+    for (int e = 0; e < elems_per_thread_; e++) {
+      int index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
+      short g_q = raders_g_q[index / rader_m];
+      // TODO swap these around
+      read_buf[index + rader_m] =
+          in[batch_idx + rader_m + (g_q - 1) * rader_m + index % rader_m];
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    RADER_STEPS()
+
+    // Fill in the element not in the N-1 cyclic convolution
+    int x_sum_index = metal::min(i, rader_m - 1);
+    read_buf[x_sum_index] = read_buf[rader_m + x_sum_index * (rader_n - 1)];
+
+    float2 temp[MAX_ELEMS_PER_THREAD];
+    float2 inv = {1.0f, -1.0f};
+    for (int e = 0; e < elems_per_thread_; e++) {
+      int index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
+      int interleaved_index =
+          index / rader_m + (index % rader_m) * (rader_n - 1);
+      temp[e] = complex_mul(
+          read_buf[rader_m + interleaved_index],
+          raders_b_q[interleaved_index % (rader_n - 1)]);
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int e = 0; e < elems_per_thread_; e++) {
+      int index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
+      read_buf[rader_m + index] = temp[e] * inv;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    p = 1;
+    RADER_STEPS()
+
+    int x_0_index = metal::min(i * elems_per_thread_ / rader_n, rader_m - 1);
+    // We have to load two x_0s for each thread since sometimes
+    // elems_per_thread_ crosses a boundary. E.g. with n = 34, rader_n = 17,
+    // rader_m = 2 0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 6 6 6 6 7 7 7
+    // 7 8 8 x x x x x x x x x x x x x x x x x - - - - - - - - - - - - - - - - -
+    float2 x_0[2] = {in[batch_idx + x_0_index], in[batch_idx + x_0_index + 1]};
+
+    float2 inv_factor = {1.0f / (rader_n - 1), -1.0f / (rader_n - 1)};
+
+    // We will have less than one x_0 value per thread
+    for (int e = 0; e < elems_per_thread_; e++) {
+      int index = metal::min(i * elems_per_thread_ + e, n - 2);
+      int diff_index = index / (rader_n - 1) - x_0_index;
+      temp[e] = read_buf[rader_m + index] * inv_factor + x_0[diff_index];
+    }
+
+    // Cache the n-1 element
+    float2 x_sum = read_buf[x_0_index] + x_0[0];
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int e = 0; e < elems_per_thread_; e++) {
+      int index = metal::min(i * elems_per_thread_ + e, n - 2);
+      int g_q_index = index % (rader_n - 1);
+      short g_q = raders_g_minus_q[g_q_index];
+      int out_index = index - g_q_index + g_q + (index / (rader_n - 1));
+      read_buf[out_index] = temp[e];
+    }
+
+    read_buf[x_0_index * rader_n] = x_sum;
+  } else {
+    for (int e = 0; e < elems_per_thread_; e++) {
+      int index = metal::min(i * elems_per_thread_ + e, n - 1);
+      read_buf[index] = in[batch_idx + index];
+    }
+  }
+
+  threadgroup_barrier(mem_flags::mem_threadgroup);
 
   p = rader_n;
-  RADIX_STEP(2, radix2, radix_2_steps_);
-  RADIX_STEP(3, radix3, radix_3_steps_);
-  RADIX_STEP(4, radix4, radix_4_steps_);
-  RADIX_STEP(5, radix5, radix_5_steps_);
-  RADIX_STEP(7, radix7, radix_7_steps_);
-  RADIX_STEP(11, radix11, radix_11_steps_);
-  RADIX_STEP(13, radix13, radix_13_steps_);
+  RADIX_STEPS()
+
+  // Write to device
+  for (int e = 0; e < elems_per_thread_; e++) {
+    int index = metal::min(i * elems_per_thread_ + e, n - 1);
+    out[batch_idx + index] = read_buf[index];
+  }
 }
 
 template <int tg_mem_size>

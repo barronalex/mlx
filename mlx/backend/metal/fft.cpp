@@ -40,11 +40,15 @@ std::vector<int> prime_factors(int n) {
 std::vector<int> plan_stockham_fft(int n) {
   auto radices = FFT::supported_radices();
   std::vector<int> plan(radices.size(), 0);
+  int orig_n = n;
   if (n == 1) {
     return plan;
   }
   for (int i = 0; i < radices.size(); i++) {
     int radix = radices[i];
+    if (is_power_of_2(orig_n) && orig_n < 512 && radix > 4) {
+      continue;
+    }
     while (n % radix == 0) {
       plan[i] += 1;
       n /= radix;
@@ -217,7 +221,7 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
       make_bool(&inverse_, 0), make_bool(&power_of_2, 1)};
 
   // Start of radix/rader step constants
-  int index = 7;
+  int index = 4;
   int elems_per_thread = 0;
   for (int i = 0; i < plan.stockham.size(); i++) {
     func_consts.push_back(make_int(&plan.stockham[i], index));
@@ -236,13 +240,8 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
   func_consts.push_back(make_int(&elems_per_thread, 2));
 
   // Compute which one is the first radix
-  auto [first_radix, last_radix] = find_first_last_nonzero_radix(plan.stockham);
-  auto [first_rader, last_rader] = find_first_last_nonzero_radix(plan.rader);
-
-  func_consts.push_back(make_int(&first_radix, 3));
-  func_consts.push_back(make_int(&last_radix, 4));
-  func_consts.push_back(make_int(&first_rader, 5));
-  func_consts.push_back(make_int(&last_rader, 6));
+  bool is_rader = plan.rader_n > 1;
+  func_consts.push_back(make_bool(&is_rader, 3));
 
   // The overall number of FFTs we're going to compute for this input
   int total_batch_size = in.size() / in.shape(axes_[0]);
@@ -286,7 +285,6 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
     auto& raders_b_q = inputs[1];
     auto& raders_g_q = inputs[2];
     auto& raders_g_minus_q = inputs[3];
-    // std::cout << "raders b_q " << raders_b_q << std::endl;
     compute_encoder.set_input_array(raders_b_q, 2);
     compute_encoder.set_input_array(raders_g_q, 3);
     compute_encoder.set_input_array(raders_g_minus_q, 4);
