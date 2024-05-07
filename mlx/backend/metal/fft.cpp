@@ -240,6 +240,8 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
   // Higher elems per thread hit memory bandwidth bottlenecks
   elems_per_thread = std::min(elems_per_thread, 8);
   func_consts.push_back(make_int(&elems_per_thread, 2));
+  int rader_m = n / plan.rader_n;
+  func_consts.push_back(make_int(&rader_m, 20));
 
   // Compute which one is the first radix
   bool is_rader = plan.rader_n > 1;

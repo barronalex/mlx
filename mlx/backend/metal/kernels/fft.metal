@@ -40,6 +40,7 @@ constant int rader_5_steps_ [[function_constant(16)]];
 constant int rader_4_steps_ [[function_constant(17)]];
 constant int rader_3_steps_ [[function_constant(18)]];
 constant int rader_2_steps_ [[function_constant(19)]];
+constant int rader_m_ [[function_constant(20)]];
 
 float2 complex_mul(float2 a, float2 b) {
   float2 c = {a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x};
@@ -560,17 +561,20 @@ template <int tg_mem_size>
   short indices[MAX_OUTPUT_SIZE];
   float2 values[MAX_OUTPUT_SIZE];
 
-  short rader_m = n / rader_n;
+  // int rader_m = n / rader_n;
+  int rader_m = rader_m_;
 
-  short index = 0;
+  int index = 0;
   short g_q_index = 0;
   short g_q = 0;
   short out_index = 0;
   short diff_index = 0;
   short interleaved_index = 0;
 
+  int max_index = n - rader_m - 1;
+
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
+    index = metal::min(i * elems_per_thread_ + e, max_index);
     g_q = raders_g_q[index / rader_m];
     read_buf[index + rader_m] =
         in[batch_idx + rader_m + (g_q - 1) * rader_m + index % rader_m];
@@ -588,7 +592,7 @@ template <int tg_mem_size>
   float2 temp[MAX_ELEMS_PER_THREAD];
   float2 inv = {1.0f, -1.0f};
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
+    index = metal::min(i * elems_per_thread_ + e, max_index);
     interleaved_index = index / rader_m + (index % rader_m) * (rader_n - 1);
     temp[e] = complex_mul(
         read_buf[rader_m + interleaved_index],
@@ -598,7 +602,7 @@ template <int tg_mem_size>
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
+    index = metal::min(i * elems_per_thread_ + e, max_index);
     read_buf[rader_m + index] = temp[e] * inv;
   }
 
@@ -618,7 +622,7 @@ template <int tg_mem_size>
 
   // We will have less than one x_0 value per thread
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(i * elems_per_thread_ + e, n - 2);
+    index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
     diff_index = index / (rader_n - 1) - x_0_index;
     temp[e] = read_buf[rader_m + index] * inv_factor + x_0[diff_index];
   }
@@ -629,7 +633,7 @@ template <int tg_mem_size>
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(i * elems_per_thread_ + e, n - 2);
+    index = metal::min(i * elems_per_thread_ + e, max_index);
     g_q_index = index % (rader_n - 1);
     g_q = raders_g_minus_q[g_q_index];
     out_index = index - g_q_index + g_q + (index / (rader_n - 1));
@@ -645,7 +649,7 @@ template <int tg_mem_size>
 
   // Write to device
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = i * elems_per_thread_ + e;
+    index = metal::min(i * elems_per_thread_ + e, max_index);
     out[batch_idx + index] = read_buf[index];
   }
 }
