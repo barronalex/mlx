@@ -59,10 +59,12 @@ def run_bench_mps(system_size, fft_sizes):
 
 def time_fft():
     x = range(2, 47)
+    x = [17, 19, 23, 29, 31, 37, 41, 43]
     system_size = int(2**26)
 
     with mx.stream(mx.gpu):
         gpu_bandwidths = run_bench(system_size=system_size, fft_sizes=x)
+    exit()
 
     np.save("gpu_bandwidths", gpu_bandwidths)
 
@@ -96,6 +98,7 @@ def time_fft():
         (bluesteins, "Bluestein's"),
     ]:
         # plot bandwidths
+        print(name)
         plt.scatter(x[indices], gpu_bandwidths[indices], color="green", label="GPU")
         plt.scatter(x[indices], mps_bandwidths[indices], color="blue", label="MPS")
         plt.scatter(x[indices], cpu_bandwidths[indices], color="red", label="CPU")

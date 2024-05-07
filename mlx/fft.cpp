@@ -166,13 +166,20 @@ array fft_impl(
     // for (int p: plan.rader) {
     //   std::cout << "rader p " << p << std::endl;
     // }
-    auto [b_q, g_q, g_minus_q] =
-        compute_raders_constants(std::max(plan.rader_n, 11));
+    std::vector<array> inputs = {astype(in, in_type, s)};
+    if (plan.rader_n > 1) {
+      auto [b_q, g_q, g_minus_q] =
+          compute_raders_constants(std::max(plan.rader_n, 11));
+      inputs.push_back(b_q);
+      inputs.push_back(g_q);
+      inputs.push_back(g_minus_q);
+    }
+
     return array(
         out_shape,
         out_type,
         std::make_shared<FFT>(stream, valid_axes, inverse, real),
-        {astype(in, in_type, s), b_q, g_q, g_minus_q});
+        inputs);
 
     // Check if n can be done with the Stockham algorithm
     // auto plan = FFT::plan_stockham_fft(n_1d);

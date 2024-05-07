@@ -13,8 +13,8 @@
 
 using namespace metal;
 
-#define MAX_OUTPUT_SIZE 22
-#define MAX_ELEMS_PER_THREAD 13
+#define MAX_OUTPUT_SIZE 16
+#define MAX_ELEMS_PER_THREAD 8
 
 // Specialize for a particular value of N at runtime
 constant bool inv_ [[function_constant(0)]];
@@ -58,20 +58,20 @@ typedef void (*RadixFunc)(thread float2*, thread float2*);
 template <int radix, RadixFunc radix_func>
 void radix_n(
     int i,
-    int p,
+    short p,
     thread float2* x,
-    thread int* indices,
+    thread short* indices,
     thread float2* y) {
   // i: the index in the overall DFT that we're processing.
   // p: the size of the DFTs we're merging at this step.
   // m: how many threads are working on this DFT.
 
-  int k, j;
+  short k, j;
 
   // Use faster bitwise operations when working with powers of two
   constexpr bool radix_p_2 = (radix & (radix - 1)) == 0;
   if (radix_p_2 && is_power_of_2_) {
-    constexpr int power = __builtin_ctz(radix);
+    constexpr short power = __builtin_ctz(radix);
     k = i & (p - 1);
     j = ((i - k) << power) + k;
   } else {
@@ -250,6 +250,7 @@ void radix8(thread float2* x, thread float2* y) {
   y[7] = x[3] - x_7;
 }
 
+template <bool raders_perm>
 void radix10(thread float2* x, thread float2* y) {
   float2 w[4];
   w[0] = {0.8090169943749475, -0.5877852522924731};
@@ -257,10 +258,17 @@ void radix10(thread float2* x, thread float2* y) {
   w[2] = {-w[1].x, w[1].y};
   w[3] = {-w[0].x, w[0].y};
 
-  float2 temp[10] = {
-      x[0], x[2], x[4], x[6], x[8], x[1], x[3], x[5], x[7], x[9]};
-  radix5(temp, x);
-  radix5(temp + 5, x + 5);
+  if (raders_perm) {
+    float2 temp[10] = {
+        x[0], x[3], x[4], x[8], x[2], x[1], x[7], x[9], x[6], x[5]};
+    radix5(temp, x);
+    radix5(temp + 5, x + 5);
+  } else {
+    float2 temp[10] = {
+        x[0], x[2], x[4], x[6], x[8], x[1], x[3], x[5], x[7], x[9]};
+    radix5(temp, x);
+    radix5(temp + 5, x + 5);
+  }
 
   y[0] = x[0] + x[5];
   y[5] = x[0] - x[5];
@@ -285,27 +293,31 @@ void radix11(thread float2* x, thread float2* y) {
   b_q[8] = {b_q[2].x, -b_q[2].y};
   b_q[9] = {-b_q[1].x, b_q[1].y};
 
-  float2 in1[10] = {
-      x[1], x[2], x[4], x[8], x[5], x[10], x[9], x[7], x[3], x[6]};
-  radix10(in1, y + 1);
-  float2 x_sum = y[1];
-
   float2 conj = {1, -1};
   float2 inv = {1 / 10.0, -1 / 10.0};
+
+  radix10<true>(x + 1, y + 1);
+
+  float2 x_sum = y[1];
 
 #pragma clang loop unroll(full)
   for (int t = 0; t < 10; t++) {
     y[t + 1] = complex_mul(y[t + 1], b_q[t]) * conj;
   }
 
-  radix10(y + 1, x + 1);
+  radix10<false>(y + 1, x + 1);
 
-  int perm[10] = {1, 6, 3, 7, 9, 10, 5, 8, 4, 2};
   y[0] = x_sum + x[0];
-#pragma clang loop unroll(full)
-  for (int t = 0; t < 10; t++) {
-    y[perm[t]] = x[t + 1] * inv + x[0];
-  }
+  y[1] = x[1] * inv + x[0];
+  y[6] = x[2] * inv + x[0];
+  y[3] = x[3] * inv + x[0];
+  y[7] = x[4] * inv + x[0];
+  y[9] = x[5] * inv + x[0];
+  y[10] = x[6] * inv + x[0];
+  y[5] = x[7] * inv + x[0];
+  y[8] = x[8] * inv + x[0];
+  y[4] = x[9] * inv + x[0];
+  y[2] = x[10] * inv + x[0];
 }
 
 void radix12(thread float2* x, thread float2* y) {
@@ -385,22 +397,23 @@ void radix13(thread float2* x, thread float2* y) {
 template <int radix, RadixFunc radix_func>
 void radix_n_step(
     int i,
-    thread int* p,
+    thread short* p,
     int m,
     int n,
     int num_steps,
+    thread float2* inputs,
+    thread short* indices,
+    thread float2* values,
     threadgroup float2* read_buf) {
   // Thread local memory for inputs and outputs to the radix codelet
-  float2 inputs[radix];
-  int indices[MAX_OUTPUT_SIZE];
-  float2 values[MAX_OUTPUT_SIZE];
-
   int m_r = n / radix;
   int max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
 
+  short index = 0;
+  short r_index = 0;
   for (int s = 0; s < num_steps; s++) {
     for (int t = 0; t < max_radices_per_thread; t++) {
-      int index = i + t * m;
+      index = i + t * m;
       if (index < m_r) {
         for (int r = 0; r < radix; r++) {
           inputs[r] = read_buf[index + r * m_r];
@@ -414,10 +427,10 @@ void radix_n_step(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     for (int t = 0; t < max_radices_per_thread; t++) {
-      int index = i + t * m;
+      index = i + t * m;
       if (index < m_r) {
         for (int r = 0; r < radix; r++) {
-          int r_index = t * radix + r;
+          r_index = t * radix + r;
           read_buf[indices[r_index]] = values[r_index];
         }
       }
@@ -430,11 +443,20 @@ void radix_n_step(
 }
 
 #define RADIX_STEP(radix, radix_func, num_steps) \
-  radix_n_step<radix, radix_func>(i, &p, m, n, num_steps, read_buf);
+  radix_n_step<radix, radix_func>(               \
+      i, &p, m, n, num_steps, inputs, indices, values, read_buf);
 
 #define RADER_STEP(radix, radix_func, num_steps) \
   radix_n_step<radix, radix_func>(               \
-      i, &p, m, n - rader_m, num_steps, read_buf + rader_m);
+      i,                                         \
+      &p,                                        \
+      m,                                         \
+      n - rader_m,                               \
+      num_steps,                                 \
+      inputs,                                    \
+      indices,                                   \
+      values,                                    \
+      read_buf + rader_m);
 
 #define RADIX_STEPS()                       \
   RADIX_STEP(2, radix2, radix_2_steps_);    \
@@ -464,12 +486,8 @@ template <int tg_mem_size>
 [[kernel]] void fft(
     const device float2* in [[buffer(0)]],
     device float2* out [[buffer(1)]],
-    const device float2* raders_b_q [[buffer(2)]],
-    const device short* raders_g_q [[buffer(3)]],
-    const device short* raders_g_minus_q [[buffer(4)]],
     constant const int& n,
     constant const int& batch_size,
-    constant const int& rader_n,
     uint3 elem [[thread_position_in_grid]],
     uint3 grid [[threads_per_grid]]) {
   int i = elem.z;
@@ -488,85 +506,137 @@ template <int tg_mem_size>
     return;
   }
 
-  int p = 1;
+  float2 inputs[13];
+  short indices[MAX_OUTPUT_SIZE];
+  float2 values[MAX_OUTPUT_SIZE];
 
-  if (is_rader_) {
-    int rader_m = n / rader_n;
-    for (int e = 0; e < elems_per_thread_; e++) {
-      int index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
-      short g_q = raders_g_q[index / rader_m];
-      // TODO swap these around
-      read_buf[index + rader_m] =
-          in[batch_idx + rader_m + (g_q - 1) * rader_m + index % rader_m];
-    }
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    RADER_STEPS()
-
-    // Fill in the element not in the N-1 cyclic convolution
-    int x_sum_index = metal::min(i, rader_m - 1);
-    read_buf[x_sum_index] = read_buf[rader_m + x_sum_index * (rader_n - 1)];
-
-    float2 temp[MAX_ELEMS_PER_THREAD];
-    float2 inv = {1.0f, -1.0f};
-    for (int e = 0; e < elems_per_thread_; e++) {
-      int index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
-      int interleaved_index =
-          index / rader_m + (index % rader_m) * (rader_n - 1);
-      temp[e] = complex_mul(
-          read_buf[rader_m + interleaved_index],
-          raders_b_q[interleaved_index % (rader_n - 1)]);
-    }
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    for (int e = 0; e < elems_per_thread_; e++) {
-      int index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
-      read_buf[rader_m + index] = temp[e] * inv;
-    }
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    p = 1;
-    RADER_STEPS()
-
-    int x_0_index = metal::min(i * elems_per_thread_ / rader_n, rader_m - 1);
-    // We have to load two x_0s for each thread since sometimes
-    // elems_per_thread_ crosses a boundary. E.g. with n = 34, rader_n = 17,
-    // rader_m = 2 0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 6 6 6 6 7 7 7
-    // 7 8 8 x x x x x x x x x x x x x x x x x - - - - - - - - - - - - - - - - -
-    float2 x_0[2] = {in[batch_idx + x_0_index], in[batch_idx + x_0_index + 1]};
-
-    float2 inv_factor = {1.0f / (rader_n - 1), -1.0f / (rader_n - 1)};
-
-    // We will have less than one x_0 value per thread
-    for (int e = 0; e < elems_per_thread_; e++) {
-      int index = metal::min(i * elems_per_thread_ + e, n - 2);
-      int diff_index = index / (rader_n - 1) - x_0_index;
-      temp[e] = read_buf[rader_m + index] * inv_factor + x_0[diff_index];
-    }
-
-    // Cache the n-1 element
-    float2 x_sum = read_buf[x_0_index] + x_0[0];
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    for (int e = 0; e < elems_per_thread_; e++) {
-      int index = metal::min(i * elems_per_thread_ + e, n - 2);
-      int g_q_index = index % (rader_n - 1);
-      short g_q = raders_g_minus_q[g_q_index];
-      int out_index = index - g_q_index + g_q + (index / (rader_n - 1));
-      read_buf[out_index] = temp[e];
-    }
-
-    read_buf[x_0_index * rader_n] = x_sum;
-  } else {
-    for (int e = 0; e < elems_per_thread_; e++) {
-      int index = metal::min(i * elems_per_thread_ + e, n - 1);
-      read_buf[index] = in[batch_idx + index];
-    }
+  for (int e = 0; e < elems_per_thread_; e++) {
+    int index = metal::min(i + e * m, n - 1);
+    read_buf[index] = in[batch_idx + index];
   }
+
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  short p = 1;
+  RADIX_STEPS()
+
+  // Write to device
+  for (int e = 0; e < elems_per_thread_; e++) {
+    int index = metal::min(i + e * m, n - 1);
+    out[batch_idx + index] = read_buf[index];
+  }
+}
+
+template <int tg_mem_size>
+[[kernel]] void rader_fft(
+    const device float2* in [[buffer(0)]],
+    device float2* out [[buffer(1)]],
+    const device float2* raders_b_q [[buffer(2)]],
+    const device short* raders_g_q [[buffer(3)]],
+    const device short* raders_g_minus_q [[buffer(4)]],
+    constant const int& n,
+    constant const int& batch_size,
+    constant const int& rader_n,
+    uint3 elem [[thread_position_in_grid]],
+    uint3 grid [[threads_per_grid]],
+    uint simd_lane_id [[thread_index_in_simdgroup]]) {
+  int i = elem.z;
+  int tg_idx = elem.y * n;
+  int batch_idx = elem.x * grid.y * n + tg_idx;
+
+  // The number of the threads we're using for each DFT
+  int m = grid.z;
+
+  threadgroup float2 shared_in[tg_mem_size];
+  threadgroup float2* read_buf = &shared_in[tg_idx];
+
+  // Account for possible extra threadgroups
+  int grid_index = elem.x * grid.y + elem.y;
+  if (grid_index >= batch_size) {
+    return;
+  }
+
+  float2 inputs[13];
+  short indices[MAX_OUTPUT_SIZE];
+  float2 values[MAX_OUTPUT_SIZE];
+
+  short rader_m = n / rader_n;
+
+  short index = 0;
+  short g_q_index = 0;
+  short g_q = 0;
+  short out_index = 0;
+  short diff_index = 0;
+  short interleaved_index = 0;
+
+  for (int e = 0; e < elems_per_thread_; e++) {
+    index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
+    g_q = raders_g_q[index / rader_m];
+    read_buf[index + rader_m] =
+        in[batch_idx + rader_m + (g_q - 1) * rader_m + index % rader_m];
+  }
+
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  short p = 1;
+  RADER_STEPS()
+
+  // Fill in the element not in the N-1 cyclic convolution
+  int x_sum_index = metal::min(i, rader_m - 1);
+  read_buf[x_sum_index] = read_buf[rader_m + x_sum_index * (rader_n - 1)];
+
+  float2 temp[MAX_ELEMS_PER_THREAD];
+  float2 inv = {1.0f, -1.0f};
+  for (int e = 0; e < elems_per_thread_; e++) {
+    index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
+    interleaved_index = index / rader_m + (index % rader_m) * (rader_n - 1);
+    temp[e] = complex_mul(
+        read_buf[rader_m + interleaved_index],
+        raders_b_q[interleaved_index % (rader_n - 1)]);
+  }
+
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (int e = 0; e < elems_per_thread_; e++) {
+    index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
+    read_buf[rader_m + index] = temp[e] * inv;
+  }
+
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  p = 1;
+  RADER_STEPS()
+
+  short x_0_index = metal::min(i * elems_per_thread_ / rader_n, rader_m - 1);
+  // We have to load two x_0s for each thread since sometimes
+  // elems_per_thread_ crosses a boundary. E.g. with n = 34, rader_n = 17
+  // 0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 6 6 6 6 7 7 7 7 8 8
+  // x x x x x x x x x x x x x x x x x - - - - - - - - - - - - - - - - -
+  float2 x_0[2] = {in[batch_idx + x_0_index], in[batch_idx + x_0_index + 1]};
+
+  float2 inv_factor = {1.0f / (rader_n - 1), -1.0f / (rader_n - 1)};
+
+  // We will have less than one x_0 value per thread
+  for (int e = 0; e < elems_per_thread_; e++) {
+    index = metal::min(i * elems_per_thread_ + e, n - 2);
+    diff_index = index / (rader_n - 1) - x_0_index;
+    temp[e] = read_buf[rader_m + index] * inv_factor + x_0[diff_index];
+  }
+
+  // Cache the n-1 element
+  float2 x_sum = read_buf[x_0_index] + x_0[0];
+
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  for (int e = 0; e < elems_per_thread_; e++) {
+    index = metal::min(i * elems_per_thread_ + e, n - 2);
+    g_q_index = index % (rader_n - 1);
+    g_q = raders_g_minus_q[g_q_index];
+    out_index = index - g_q_index + g_q + (index / (rader_n - 1));
+    read_buf[out_index] = temp[e];
+  }
+
+  read_buf[x_0_index * rader_n] = x_sum;
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -575,7 +645,7 @@ template <int tg_mem_size>
 
   // Write to device
   for (int e = 0; e < elems_per_thread_; e++) {
-    int index = metal::min(i * elems_per_thread_ + e, n - 1);
+    index = i * elems_per_thread_ + e;
     out[batch_idx + index] = read_buf[index];
   }
 }
@@ -749,14 +819,25 @@ template <int tg_mem_size>
   fft<tg_mem_size>(                                               \
       const device float2* in [[buffer(0)]],                      \
       device float2* out [[buffer(1)]],                           \
-      const device float2* raders_b_q [[buffer(2)]],              \
-      const device short* raders_g_q [[buffer(3)]],               \
-      const device short* raders_g_minus_q [[buffer(4)]],         \
       constant const int& n,                                      \
       constant const int& batch_size,                             \
-      constant const int& rader_n,                                \
       uint3 elem [[thread_position_in_grid]],                     \
       uint3 grid [[threads_per_grid]]);
+
+#define instantiate_rader(tg_mem_size)                                  \
+  template [[host_name("rader_fft_mem_" #tg_mem_size)]] [[kernel]] void \
+  rader_fft<tg_mem_size>(                                               \
+      const device float2* in [[buffer(0)]],                            \
+      device float2* out [[buffer(1)]],                                 \
+      const device float2* raders_b_q [[buffer(2)]],                    \
+      const device short* raders_g_q [[buffer(3)]],                     \
+      const device short* raders_g_minus_q [[buffer(4)]],               \
+      constant const int& n,                                            \
+      constant const int& batch_size,                                   \
+      constant const int& rader_n,                                      \
+      uint3 elem [[thread_position_in_grid]],                           \
+      uint3 grid [[threads_per_grid]],                                  \
+      uint simd_lane_id [[thread_index_in_simdgroup]]);
 
 #define instantiate_rfft(tg_mem_size)                              \
   template [[host_name("rfft_mem_" #tg_mem_size)]] [[kernel]] void \
@@ -781,17 +862,26 @@ template <int tg_mem_size>
       uint3 elem [[thread_position_in_grid]],                               \
       uint3 grid [[threads_per_grid]]);
 
+// clang-format off
 #define instantiate_ffts(tg_mem_size)                        \
-  instantiate_fft(tg_mem_size) instantiate_rfft(tg_mem_size) \
-      instantiate_bluestein(tg_mem_size)
+  instantiate_fft(tg_mem_size) \
+  instantiate_rfft(tg_mem_size) \
+  instantiate_rader(tg_mem_size) \
+  instantiate_bluestein(tg_mem_size)
 
 // It's substantially faster to statically define the
 // threadgroup memory size rather than using
 // `setThreadgroupMemoryLength` on the compute encoder.
 // For non-power of 2 sizes we round up the shared memory.
-instantiate_ffts(4) instantiate_ffts(8) instantiate_ffts(16)
-    instantiate_ffts(32) instantiate_ffts(64) instantiate_ffts(128)
-        instantiate_ffts(256) instantiate_ffts(512) instantiate_ffts(1024)
-            instantiate_ffts(2048)
-    // 4096 is the max that will fit into 32KB of threadgroup memory.
-    instantiate_ffts(4096)
+instantiate_ffts(4)
+instantiate_ffts(8)
+instantiate_ffts(16)
+instantiate_ffts(32)
+instantiate_ffts(64)
+instantiate_ffts(128)
+instantiate_ffts(256)
+instantiate_ffts(512)
+instantiate_ffts(1024)
+instantiate_ffts(2048)
+// 4096 is the max that will fit into 32KB of threadgroup memory.
+instantiate_ffts(4096) // clang-format on

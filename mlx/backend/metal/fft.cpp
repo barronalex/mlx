@@ -237,6 +237,8 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
       elems_per_thread = std::max(elems_per_thread, radices[i]);
     }
   }
+  // Higher elems per thread hit memory bandwidth bottlenecks
+  elems_per_thread = std::min(elems_per_thread, 8);
   func_consts.push_back(make_int(&elems_per_thread, 2));
 
   // Compute which one is the first radix
@@ -267,6 +269,8 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
     std::string inv_string = inverse_ ? "true" : "false";
     if (bluestein_n > 0) {
       kname << "bluestein_fft_mem_" << threadgroup_mem_size;
+    } else if (plan.rader_n > 1) {
+      kname << "rader_fft_mem_" << threadgroup_mem_size;
     } else if (in.dtype() == float32) {
       kname << "rfft_mem_" << threadgroup_mem_size;
     } else {
@@ -282,13 +286,6 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
     compute_encoder.set_input_array(in_contiguous, 0);
     compute_encoder.set_output_array(out, 1);
 
-    auto& raders_b_q = inputs[1];
-    auto& raders_g_q = inputs[2];
-    auto& raders_g_minus_q = inputs[3];
-    compute_encoder.set_input_array(raders_b_q, 2);
-    compute_encoder.set_input_array(raders_g_q, 3);
-    compute_encoder.set_input_array(raders_g_minus_q, 4);
-
     if (bluestein_n > 0) {
       // Precomputed twiddle factors for Bluestein's
       auto& w_q = inputs[1];
@@ -298,10 +295,19 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
       compute_encoder->setBytes(&n, sizeof(int), 7);
       compute_encoder->setBytes(&bluestein_n, sizeof(int), 8);
       compute_encoder->setBytes(&total_batch_size, sizeof(int), 9);
-    } else {
+    } else if (plan.rader_n > 1) {
+      auto& raders_b_q = inputs[1];
+      auto& raders_g_q = inputs[2];
+      auto& raders_g_minus_q = inputs[3];
+      compute_encoder.set_input_array(raders_b_q, 2);
+      compute_encoder.set_input_array(raders_g_q, 3);
+      compute_encoder.set_input_array(raders_g_minus_q, 4);
       compute_encoder->setBytes(&n, sizeof(int), 5);
       compute_encoder->setBytes(&total_batch_size, sizeof(int), 6);
       compute_encoder->setBytes(&plan.rader_n, sizeof(int), 7);
+    } else {
+      compute_encoder->setBytes(&n, sizeof(int), 2);
+      compute_encoder->setBytes(&total_batch_size, sizeof(int), 3);
     }
 
     // std::cout << "fft size " << fft_size << std::endl;
