@@ -12,13 +12,8 @@ class TestFFT(mlx_tests.MLXTestCase):
     def check_mx_np(self, op_mx, op_np, a_np, atol=1e-5, rtol=1e-6, **kwargs):
         out_np = op_np(a_np, **kwargs)
         a_mx = mx.array(a_np)
-        try:
-            out_mx = op_mx(a_mx, **kwargs)
-            np.testing.assert_allclose(out_np, out_mx, atol=atol, rtol=rtol)
-            print("SUCCEEDED", a_mx.shape[-1])
-        except (AssertionError, RuntimeError) as e:
-            # print(e)
-            print("FAILED", a_mx.shape[-1])
+        out_mx = op_mx(a_mx, **kwargs)
+        np.testing.assert_allclose(out_np, out_mx, atol=atol, rtol=rtol)
 
     def test_fft(self):
         r = np.random.rand(100).astype(np.float32)
@@ -107,8 +102,10 @@ class TestFFT(mlx_tests.MLXTestCase):
 
     def test_fft_exhaustive(self):
         for batch_size in (1, 3, 32):
-            for num in range(2, 1025):
-                self._run_ffts((batch_size, num))
+            for num in range(2, 2048):
+                print(num)
+                atol = 1e-4 if num < 1025 else 1e-3
+                self._run_ffts((batch_size, num), atol=atol)
 
     def test_fft_big_powers_of_two(self):
         # TODO: improve precision on big powers of two on GPU

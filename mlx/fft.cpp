@@ -167,7 +167,9 @@ array fft_impl(
     //   std::cout << "rader p " << p << std::endl;
     // }
     std::vector<array> inputs = {astype(in, in_type, s)};
-    if (plan.rader_n > 1) {
+    if (plan.bluestein_n > 0) {
+      return bluestein_fft(in, n_1d, axis, inverse, s);
+    } else if (plan.rader_n > 1) {
       auto [b_q, g_q, g_minus_q] =
           compute_raders_constants(std::max(plan.rader_n, 11));
       inputs.push_back(b_q);

@@ -934,6 +934,7 @@ struct FFTPlan {
   std::vector<int> rader;
   // Rader factor, 1 if no rader factors
   int rader_n = 1;
+  int bluestein_n = -1;
 };
 
 class FFT : public UnaryPrimitive {

@@ -15,6 +15,7 @@ using namespace metal;
 
 #define MAX_OUTPUT_SIZE 16
 #define MAX_ELEMS_PER_THREAD 8
+#define MAX_RADIX 13
 
 // Specialize for a particular value of N at runtime
 constant bool inv_ [[function_constant(0)]];
@@ -57,7 +58,7 @@ float2 get_twiddle(int k, int p) {
 typedef void (*RadixFunc)(thread float2*, thread float2*);
 
 template <int radix, RadixFunc radix_func>
-void radix_n(
+METAL_FUNC void radix_n(
     int i,
     short p,
     thread float2* x,
@@ -111,12 +112,12 @@ void radix_n(
 // For n=7,11,13 we use Rader's algorithm which decomposes
 // them into (n-1)=6,10,12 codelets.
 
-void radix2(thread float2* x, thread float2* y) {
+METAL_FUNC void radix2(thread float2* x, thread float2* y) {
   y[0] = x[0] + x[1];
   y[1] = x[0] - x[1];
 }
 
-void radix3(thread float2* x, thread float2* y) {
+METAL_FUNC void radix3(thread float2* x, thread float2* y) {
   float pi_2_3 = -0.8660254037844387;
 
   float2 a_1 = x[1] + x[2];
@@ -131,7 +132,7 @@ void radix3(thread float2* x, thread float2* y) {
   y[2] = b_1 - b_2_j;
 }
 
-void radix4(thread float2* x, thread float2* y) {
+METAL_FUNC void radix4(thread float2* x, thread float2* y) {
   float2 z_0 = x[0] + x[2];
   float2 z_1 = x[0] - x[2];
   float2 z_2 = x[1] + x[3];
@@ -144,7 +145,7 @@ void radix4(thread float2* x, thread float2* y) {
   y[3] = z_1 - z_3_i;
 }
 
-void radix5(thread float2* x, thread float2* y) {
+METAL_FUNC void radix5(thread float2* x, thread float2* y) {
   float2 root_5_4 = 0.5590169943749475;
   float2 sin_2pi_5 = 0.9510565162951535;
   float2 sin_1pi_5 = 0.5877852522924731;
@@ -171,7 +172,7 @@ void radix5(thread float2* x, thread float2* y) {
   y[4] = a_8 - a_10_j;
 }
 
-void radix6(thread float2* x, thread float2* y) {
+METAL_FUNC void radix6(thread float2* x, thread float2* y) {
   float sin_pi_3 = 0.8660254037844387;
   float2 a_1 = x[2] + x[4];
   float2 a_2 = x[0] - a_1 / 2;
@@ -197,7 +198,7 @@ void radix6(thread float2* x, thread float2* y) {
   y[5] = a_9 - a_12;
 }
 
-void radix7(thread float2* x, thread float2* y) {
+METAL_FUNC void radix7(thread float2* x, thread float2* y) {
   // Rader's algorithm
   float2 b_q[6];
   b_q[0] = {-1, 0};
@@ -222,15 +223,16 @@ void radix7(thread float2* x, thread float2* y) {
   radix6(y + 1, x + 1);
 
   // Inv Rader permutation
-  int perm[6] = {1, 5, 4, 6, 2, 3};
   y[0] = x_sum + x[0];
-#pragma clang loop unroll(full)
-  for (int t = 0; t < 6; t++) {
-    y[perm[t]] = x[t + 1] * inv + x[0];
-  }
+  y[1] = x[1] * inv + x[0];
+  y[5] = x[2] * inv + x[0];
+  y[4] = x[3] * inv + x[0];
+  y[6] = x[4] * inv + x[0];
+  y[2] = x[5] * inv + x[0];
+  y[3] = x[6] * inv + x[0];
 }
 
-void radix8(thread float2* x, thread float2* y) {
+METAL_FUNC void radix8(thread float2* x, thread float2* y) {
   float cos_pi_4 = 0.7071067811865476;
   float2 w_0 = {cos_pi_4, -cos_pi_4};
   float2 w_1 = {-cos_pi_4, -cos_pi_4};
@@ -252,7 +254,7 @@ void radix8(thread float2* x, thread float2* y) {
 }
 
 template <bool raders_perm>
-void radix10(thread float2* x, thread float2* y) {
+METAL_FUNC void radix10(thread float2* x, thread float2* y) {
   float2 w[4];
   w[0] = {0.8090169943749475, -0.5877852522924731};
   w[1] = {0.30901699437494745, -0.9510565162951535};
@@ -280,7 +282,7 @@ void radix10(thread float2* x, thread float2* y) {
   }
 }
 
-void radix11(thread float2* x, thread float2* y) {
+METAL_FUNC void radix11(thread float2* x, thread float2* y) {
   // Raders Algorithm
   float2 b_q[10];
   b_q[0] = {-1, 0};
@@ -321,7 +323,7 @@ void radix11(thread float2* x, thread float2* y) {
   y[2] = x[10] * inv + x[0];
 }
 
-void radix12(thread float2* x, thread float2* y) {
+METAL_FUNC void radix12(thread float2* x, thread float2* y) {
   float2 w[6];
   float sin_pi_3 = 0.8660254037844387;
   w[0] = {sin_pi_3, -0.5};
@@ -344,7 +346,7 @@ void radix12(thread float2* x, thread float2* y) {
   }
 }
 
-void radix13(thread float2* x, thread float2* y) {
+METAL_FUNC void radix13(thread float2* x, thread float2* y) {
   // Raders Algorithm
   float2 b_q[12];
   b_q[0] = {-1, 0};
@@ -387,16 +389,23 @@ void radix13(thread float2* x, thread float2* y) {
 
   radix12(y + 1, x + 1);
 
-  int perm[12] = {1, 7, 10, 5, 9, 11, 12, 6, 3, 8, 4, 2};
   y[0] = x_sum + x[0];
-#pragma clang loop unroll(full)
-  for (int t = 0; t < 12; t++) {
-    y[perm[t]] = x[t + 1] * inv + x[0];
-  }
+  y[1] = x[1] * inv + x[0];
+  y[7] = x[2] * inv + x[0];
+  y[10] = x[3] * inv + x[0];
+  y[5] = x[4] * inv + x[0];
+  y[9] = x[5] * inv + x[0];
+  y[11] = x[6] * inv + x[0];
+  y[12] = x[7] * inv + x[0];
+  y[6] = x[8] * inv + x[0];
+  y[3] = x[9] * inv + x[0];
+  y[8] = x[10] * inv + x[0];
+  y[4] = x[11] * inv + x[0];
+  y[2] = x[12] * inv + x[0];
 }
 
 template <int radix, RadixFunc radix_func>
-void radix_n_step(
+METAL_FUNC void radix_n_step(
     int i,
     thread short* p,
     int m,
@@ -445,11 +454,11 @@ void radix_n_step(
 
 #define RADIX_STEP(radix, radix_func, num_steps) \
   radix_n_step<radix, radix_func>(               \
-      i, &p, m, n, num_steps, inputs, indices, values, read_buf);
+      fft_idx, &p, m, n, num_steps, inputs, indices, values, read_buf);
 
 #define RADER_STEP(radix, radix_func, num_steps) \
   radix_n_step<radix, radix_func>(               \
-      i,                                         \
+      fft_idx,                                   \
       &p,                                        \
       m,                                         \
       n - rader_m,                               \
@@ -479,21 +488,71 @@ void radix_n_step(
   RADER_STEP(11, radix11, rader_11_steps_); \
   RADER_STEP(13, radix13, rader_13_steps_);
 
+// fft
+METAL_FUNC void read_data(
+    int n,
+    int m,
+    uint3 elem,
+    uint3 grid,
+    const device float2* in,
+    threadgroup float2* read_buf) {
+  int batch_idx = elem.x * grid.y * n + elem.y * n;
+  int fft_idx = elem.z;
+
+  for (int e = 0; e < elems_per_thread_; e++) {
+    int index = metal::min(fft_idx + e * m, n - 1);
+    read_buf[index] = in[batch_idx + index];
+  }
+
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// rfft
+// METAL_FUNC void read_data(int n, int m, uint3 elem, uint3 grid, const device
+// float* in, threadgroup float2* read_buf) {
+//   int batch_idx = elem.x * grid.y * 2 * n + elem.y * 2 * n;
+//   int fft_idx = elem.z;
+
+//   for (int t = 0; t < elems_per_thread_; t++) {
+//     int index = fft_idx + t * m;
+//     read_buf[index].x = in[batch_idx + index];
+//     read_buf[index].y = in[batch_idx + index + next_in];
+//   }
+
+//   threadgroup_barrier(mem_flags::mem_threadgroup);
+// }
+
+METAL_FUNC void write_data(
+    int n,
+    int m,
+    uint3 elem,
+    uint3 grid,
+    device float2* out,
+    threadgroup float2* read_buf) {
+  int batch_idx = elem.x * grid.y * n + elem.y * n;
+  int fft_idx = elem.z;
+
+  for (int e = 0; e < elems_per_thread_; e++) {
+    int index = metal::min(fft_idx + e * m, n - 1);
+    out[batch_idx + index] = read_buf[index];
+  }
+}
+
 // Each FFT is computed entirely in shared GPU memory.
 //
 // N is decomposed into radix-n DFTs:
 // e.g. 128 = 2 * 4 * 4 * 4
-template <int tg_mem_size>
+template <int tg_mem_size, typename in_type, typename out_type>
 [[kernel]] void fft(
-    const device float2* in [[buffer(0)]],
-    device float2* out [[buffer(1)]],
+    const device in_type* in [[buffer(0)]],
+    device out_type* out [[buffer(1)]],
     constant const int& n,
     constant const int& batch_size,
     uint3 elem [[thread_position_in_grid]],
     uint3 grid [[threads_per_grid]]) {
-  int i = elem.z;
+  int fft_idx = elem.z;
   int tg_idx = elem.y * n;
-  int batch_idx = elem.x * grid.y * n + tg_idx;
+  int batch_idx = elem.x * grid.y * n + elem.y * n;
 
   // The number of the threads we're using for each DFT
   int m = grid.z;
@@ -507,25 +566,16 @@ template <int tg_mem_size>
     return;
   }
 
-  float2 inputs[13];
+  read_data(n, m, elem, grid, in, read_buf);
+
+  float2 inputs[MAX_RADIX];
   short indices[MAX_OUTPUT_SIZE];
   float2 values[MAX_OUTPUT_SIZE];
-
-  for (int e = 0; e < elems_per_thread_; e++) {
-    int index = metal::min(i + e * m, n - 1);
-    read_buf[index] = in[batch_idx + index];
-  }
-
-  threadgroup_barrier(mem_flags::mem_threadgroup);
 
   short p = 1;
   RADIX_STEPS()
 
-  // Write to device
-  for (int e = 0; e < elems_per_thread_; e++) {
-    int index = metal::min(i + e * m, n - 1);
-    out[batch_idx + index] = read_buf[index];
-  }
+  write_data(n, m, elem, grid, out, read_buf);
 }
 
 template <int tg_mem_size>
@@ -541,7 +591,7 @@ template <int tg_mem_size>
     uint3 elem [[thread_position_in_grid]],
     uint3 grid [[threads_per_grid]],
     uint simd_lane_id [[thread_index_in_simdgroup]]) {
-  int i = elem.z;
+  int fft_idx = elem.z;
   int tg_idx = elem.y * n;
   int batch_idx = elem.x * grid.y * n + tg_idx;
 
@@ -550,14 +600,13 @@ template <int tg_mem_size>
 
   threadgroup float2 shared_in[tg_mem_size];
   threadgroup float2* read_buf = &shared_in[tg_idx];
-
   // Account for possible extra threadgroups
   int grid_index = elem.x * grid.y + elem.y;
   if (grid_index >= batch_size) {
     return;
   }
 
-  float2 inputs[13];
+  float2 inputs[MAX_RADIX];
   short indices[MAX_OUTPUT_SIZE];
   float2 values[MAX_OUTPUT_SIZE];
 
@@ -574,7 +623,7 @@ template <int tg_mem_size>
   int max_index = n - rader_m - 1;
 
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(i * elems_per_thread_ + e, max_index);
+    index = metal::min(fft_idx * elems_per_thread_ + e, max_index);
     g_q = raders_g_q[index / rader_m];
     read_buf[index + rader_m] =
         in[batch_idx + rader_m + (g_q - 1) * rader_m + index % rader_m];
@@ -586,13 +635,13 @@ template <int tg_mem_size>
   RADER_STEPS()
 
   // Fill in the element not in the N-1 cyclic convolution
-  int x_sum_index = metal::min(i, rader_m - 1);
+  int x_sum_index = metal::min(fft_idx, rader_m - 1);
   read_buf[x_sum_index] = read_buf[rader_m + x_sum_index * (rader_n - 1)];
 
   float2 temp[MAX_ELEMS_PER_THREAD];
   float2 inv = {1.0f, -1.0f};
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(i * elems_per_thread_ + e, max_index);
+    index = metal::min(fft_idx * elems_per_thread_ + e, max_index);
     interleaved_index = index / rader_m + (index % rader_m) * (rader_n - 1);
     temp[e] = complex_mul(
         read_buf[rader_m + interleaved_index],
@@ -602,7 +651,7 @@ template <int tg_mem_size>
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(i * elems_per_thread_ + e, max_index);
+    index = metal::min(fft_idx * elems_per_thread_ + e, max_index);
     read_buf[rader_m + index] = temp[e] * inv;
   }
 
@@ -611,29 +660,30 @@ template <int tg_mem_size>
   p = 1;
   RADER_STEPS()
 
-  short x_0_index = metal::min(i * elems_per_thread_ / rader_n, rader_m - 1);
+  short x_0_index =
+      metal::min(fft_idx * elems_per_thread_ / (rader_n - 1), rader_m - 1);
   // We have to load two x_0s for each thread since sometimes
-  // elems_per_thread_ crosses a boundary. E.g. with n = 34, rader_n = 17
+  // elems_per_thread_ crosses a boundary.
+  // E.g. with n = 34, rader_n = 17, elems_per_thread_ = 4
   // 0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 6 6 6 6 7 7 7 7 8 8
   // x x x x x x x x x x x x x x x x x - - - - - - - - - - - - - - - - -
   float2 x_0[2] = {in[batch_idx + x_0_index], in[batch_idx + x_0_index + 1]};
 
   float2 inv_factor = {1.0f / (rader_n - 1), -1.0f / (rader_n - 1)};
 
-  // We will have less than one x_0 value per thread
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(i * elems_per_thread_ + e, n - rader_m - 1);
+    index = metal::min(fft_idx * elems_per_thread_ + e, n - rader_m - 1);
     diff_index = index / (rader_n - 1) - x_0_index;
     temp[e] = read_buf[rader_m + index] * inv_factor + x_0[diff_index];
   }
 
-  // Cache the n-1 element
+  // x_1 + ... + x_n is computed for us in the first FFT step
   float2 x_sum = read_buf[x_0_index] + x_0[0];
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(i * elems_per_thread_ + e, max_index);
+    index = metal::min(fft_idx * elems_per_thread_ + e, max_index);
     g_q_index = index % (rader_n - 1);
     g_q = raders_g_minus_q[g_q_index];
     out_index = index - g_q_index + g_q + (index / (rader_n - 1));
@@ -649,7 +699,7 @@ template <int tg_mem_size>
 
   // Write to device
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(i * elems_per_thread_ + e, max_index);
+    index = metal::min(fft_idx * elems_per_thread_ + e, n - 1);
     out[batch_idx + index] = read_buf[index];
   }
 }
@@ -768,6 +818,10 @@ template <int tg_mem_size>
     return;
   }
 
+  float2 inputs[MAX_RADIX];
+  short indices[MAX_OUTPUT_SIZE];
+  float2 values[MAX_OUTPUT_SIZE];
+
   // load input into shared memory
   for (int t = 0; t < elems_per_thread_; t++) {
     int index = fft_idx + t * m;
@@ -784,23 +838,20 @@ template <int tg_mem_size>
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  // perform_fft(fft_idx, n, m, &read_buf, &write_buf);
+  short p = 1;
+  RADIX_STEPS()
 
+  float2 inv = float2(1.0f, -1.0f);
   for (int t = 0; t < elems_per_thread_; t++) {
     int index = fft_idx + t * m;
-    read_buf[index] = complex_mul(read_buf[index], w_q[index]);
+    read_buf[index] = complex_mul(read_buf[index], w_q[index]) * inv;
   }
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   // ifft
-  for (int t = 0; t < elems_per_thread_; t++) {
-    read_buf[fft_idx + t * m].y = -read_buf[fft_idx + t * m].y;
-  }
-
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-
-  // perform_fft(fft_idx, n, m, &read_buf, &write_buf);
+  p = 1;
+  RADIX_STEPS()
 
   float2 inv_factor = {1.0f / n, -1.0f / n};
   float2 inv_factor_overall = {1.0f / length, -1.0f / length};
@@ -820,7 +871,7 @@ template <int tg_mem_size>
 
 #define instantiate_fft(tg_mem_size)                              \
   template [[host_name("fft_mem_" #tg_mem_size)]] [[kernel]] void \
-  fft<tg_mem_size>(                                               \
+  fft<tg_mem_size, float2, float2>(                               \
       const device float2* in [[buffer(0)]],                      \
       device float2* out [[buffer(1)]],                           \
       constant const int& n,                                      \

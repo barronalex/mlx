@@ -15,6 +15,7 @@ using MTLFC = std::tuple<const void*, MTL::DataType, NS::UInteger>;
 #define MAX_SINGLE_FFT_SIZE 4096
 // Threadgroup memory batching improves throughput for small n
 #define MIN_THREADGROUP_MEM_SIZE 256
+#define MAX_ELEMS_PER_THREAD 8
 
 int FFT::next_fast_n(int n) {
   return next_power_of_2(n);
@@ -69,44 +70,36 @@ FFTPlan FFT::plan_fft(int n) {
   plan.rader = std::vector<int>(radices.size(), 0);
   // A plan is a number of steps for each supported radix
   auto factors = prime_factors(n);
+  int remaining_n = n;
   for (int factor : factors) {
     // Make sure the factor is a supported radix
     if (radices_set.find(factor) == radices_set.end()) {
+      // We only support a single Rader factor currently
+      if (plan.rader_n > 1) {
+        plan.bluestein_n = next_fast_n(2 * n - 1);
+        plan.stockham = plan_stockham_fft(plan.bluestein_n);
+        return plan;
+      }
       // See if we can use Rader's algorithm to Stockham decompose n - 1
       auto rader_factors = prime_factors(factor - 1);
       int last_factor = -1;
       for (int rf : rader_factors) {
-        // We don't nest Rader's algorithm so if one of the n - 1
-        // factors isn't Stockham decomposable we give up and do Bluestein's
+        // We don't nest Rader's algorithm so if `factor - 1`
+        // isn't Stockham decomposable we give up and do Bluestein's.
         if (radices_set.find(rf) == radices_set.end()) {
-          throw std::runtime_error("Unplannable");
+          plan.bluestein_n = next_fast_n(2 * n - 1);
+          plan.stockham = plan_stockham_fft(plan.bluestein_n);
+          return plan;
         }
       }
       plan.rader = plan_stockham_fft(factor - 1);
       plan.rader_n = factor;
-      n /= factor;
-      break;
+      remaining_n /= factor;
     }
   }
 
-  plan.stockham = plan_stockham_fft(n);
+  plan.stockham = plan_stockham_fft(remaining_n);
   return plan;
-}
-
-std::pair<int, int> find_first_last_nonzero_radix(std::vector<int> steps) {
-  auto radices = FFT::supported_radices();
-  auto non_zero = [](int p) { return p > 0; };
-  auto forward_it = std::find_if(steps.begin(), steps.end(), non_zero);
-  if (forward_it == steps.end()) {
-    return std::make_pair(0, 0);
-  }
-  int last_radix = radices[forward_it - steps.begin()];
-
-  auto back_it = std::find_if(steps.rbegin(), steps.rend(), non_zero);
-  int first_radix = radices[steps.rend() - back_it - 1];
-  // std::cout << "first radix " << first_radix << std::endl;
-  // std::cout << "last radix " << last_radix << std::endl;
-  return std::make_pair(first_radix, last_radix);
 }
 
 void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -189,23 +182,9 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
       out_strides,
       {});
 
-  int bluestein_n = -1;
   auto plan = plan_fft(n);
   auto radices = FFT::supported_radices();
-  // for (int i = 0; i < 5; i++) {
-  //   std::cout << "stockham plan " << radices[i] << " " << plan.stockham[i] <<
-  //   std::endl; std::cout << "rader plan " << radices[i] << " " <<
-  //   plan.rader[i] << std::endl;
-  // }
-  // if (plan.size() == 0) {
-  //   // Bluestein's algorithm transforms an FFT to
-  //   // a convolution of size > 2n + 1.
-  //   // We solve that conv via FFT wth the convolution theorem.
-  //   bluestein_n = next_fast_n(2 * n - 1);
-  //   plan = plan_stockham_fft(bluestein_n);
-  // }
-
-  int fft_size = bluestein_n > 0 ? bluestein_n : n;
+  int fft_size = plan.bluestein_n > 0 ? plan.bluestein_n : n;
 
   // Setup function constants
   bool power_of_2 = is_power_of_2(fft_size);
@@ -238,8 +217,9 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
     }
   }
   // Higher elems per thread hit memory bandwidth bottlenecks
-  elems_per_thread = std::min(elems_per_thread, 8);
+  elems_per_thread = std::min(elems_per_thread, MAX_ELEMS_PER_THREAD);
   func_consts.push_back(make_int(&elems_per_thread, 2));
+
   int rader_m = n / plan.rader_n;
   func_consts.push_back(make_int(&rader_m, 20));
 
@@ -269,7 +249,7 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
   {
     std::ostringstream kname;
     std::string inv_string = inverse_ ? "true" : "false";
-    if (bluestein_n > 0) {
+    if (plan.bluestein_n > 0) {
       kname << "bluestein_fft_mem_" << threadgroup_mem_size;
     } else if (plan.rader_n > 1) {
       kname << "rader_fft_mem_" << threadgroup_mem_size;
@@ -288,15 +268,15 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
     compute_encoder.set_input_array(in_contiguous, 0);
     compute_encoder.set_output_array(out, 1);
 
-    if (bluestein_n > 0) {
+    if (plan.bluestein_n > 0) {
       // Precomputed twiddle factors for Bluestein's
       auto& w_q = inputs[1];
       auto& w_k = inputs[2];
-      compute_encoder.set_input_array(w_q, 5); // w_q
-      compute_encoder.set_input_array(w_k, 6); // w_k
-      compute_encoder->setBytes(&n, sizeof(int), 7);
-      compute_encoder->setBytes(&bluestein_n, sizeof(int), 8);
-      compute_encoder->setBytes(&total_batch_size, sizeof(int), 9);
+      compute_encoder.set_input_array(w_q, 2); // w_q
+      compute_encoder.set_input_array(w_k, 3); // w_k
+      compute_encoder->setBytes(&n, sizeof(int), 4);
+      compute_encoder->setBytes(&plan.bluestein_n, sizeof(int), 5);
+      compute_encoder->setBytes(&total_batch_size, sizeof(int), 6);
     } else if (plan.rader_n > 1) {
       auto& raders_b_q = inputs[1];
       auto& raders_g_q = inputs[2];
