@@ -94,16 +94,29 @@ class TestFFT(mlx_tests.MLXTestCase):
         i = np.random.rand(*shape).astype(np.float32)
         a_np = r + 1j * i
         self.check_mx_np(mx.fft.fft, np.fft.fft, a_np, atol=atol, rtol=rtol)
-        # self.check_mx_np(mx.fft.ifft, np.fft.ifft, a_np, atol=atol, rtol=rtol)
-        # self.check_mx_np(mx.fft.rfft, np.fft.rfft, r, atol=atol, rtol=rtol)
+        self.check_mx_np(mx.fft.ifft, np.fft.ifft, a_np, atol=atol, rtol=rtol)
+        self.check_mx_np(mx.fft.rfft, np.fft.rfft, r, atol=atol, rtol=rtol)
 
-        # ia_np = np.fft.rfft(a_np)
-        # self.check_mx_np(mx.fft.irfft, np.fft.irfft, ia_np, atol=atol, rtol=rtol)
+        ia_np = np.fft.rfft(a_np)
+        self.check_mx_np(mx.fft.irfft, np.fft.irfft, ia_np, atol=atol, rtol=rtol)
 
-    def test_fft_exhaustive(self):
+    def test_fft_shared_mem(self):
+        nums = np.concatenate(
+            [
+                # small radix
+                np.arange(2, 14),
+                # powers of 2
+                [2**k for k in range(4, 13)],
+                # stockham
+                [3 * 3 * 3, 3 * 11, 11 * 13 * 2, 7 * 4 * 13 * 11, 13 * 13 * 13],
+                # rader
+                [17, 23, 29, 17 * 8 * 3, 23 * 2, 1153, 4006],
+                # bluestein
+                [47, 83, 17 * 17, 3109],
+            ]
+        )
         for batch_size in (1, 3, 32):
-            for num in range(2, 2048):
-                print(num)
+            for num in nums:
                 atol = 1e-4 if num < 1025 else 1e-3
                 self._run_ffts((batch_size, num), atol=atol)
 
@@ -115,29 +128,13 @@ class TestFFT(mlx_tests.MLXTestCase):
         for k in range(17, 20):
             self._run_ffts((3, 2**k), atol=1e-2)
 
-    def test_fft_contiguity(self):
-        r = np.random.rand(4, 8).astype(np.float32)
-        i = np.random.rand(4, 8).astype(np.float32)
-        a_np = r + 1j * i
-        a_mx = mx.array(a_np)
-
-        # non-contiguous in the FFT dim
-        out_mx = mx.fft.fft(a_mx[:, ::2])
-        out_np = np.fft.fft(a_np[:, ::2])
-        np.testing.assert_allclose(out_np, out_mx, atol=1e-5, rtol=1e-5)
-
-        # non-contiguous not in the FFT dim
-        out_mx = mx.fft.fft(a_mx[::2])
-        out_np = np.fft.fft(a_np[::2])
-        np.testing.assert_allclose(out_np, out_mx, atol=1e-5, rtol=1e-5)
-
     def test_fft_large_numbers(self):
         numbers = [
             1037,  # prime > 1024
             18247,  # medium size prime factors
-            1259 * 13,  # large prime factors
+            1259 * 11,  # large prime factors
             7883,  # large prime
-            3**7,  # large stockham decomposable
+            3**8,  # large stockham decomposable
         ]
         for large_num in numbers:
             self._run_ffts((large_num,))

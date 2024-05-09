@@ -13,6 +13,7 @@ namespace mlx::core {
 using MTLFC = std::tuple<const void*, MTL::DataType, NS::UInteger>;
 
 #define MAX_SINGLE_FFT_SIZE 4096
+#define MAX_RADER_FFT_SIZE 2048
 // Threadgroup memory batching improves throughput for small n
 #define MIN_THREADGROUP_MEM_SIZE 256
 #define MAX_ELEMS_PER_THREAD 8
@@ -47,7 +48,8 @@ std::vector<int> plan_stockham_fft(int n) {
   }
   for (int i = 0; i < radices.size(); i++) {
     int radix = radices[i];
-    if (is_power_of_2(orig_n) && orig_n < 512 && radix > 4) {
+    // Manually tuned radices for powers of 2
+    if (is_power_of_2(orig_n) && orig_n < 512 && radix > 4 && orig_n != 8) {
       continue;
     }
     while (n % radix == 0) {
@@ -75,7 +77,11 @@ FFTPlan FFT::plan_fft(int n) {
     // Make sure the factor is a supported radix
     if (radices_set.find(factor) == radices_set.end()) {
       // We only support a single Rader factor currently
-      if (plan.rader_n > 1) {
+      // TODO(alexbarron): We limit the maximum Rader size to 2048
+      // because the compiler starts doing strange things when it tries to
+      // compile rader's decompositions with multiple radix 7/11/13 codelets.
+      // e.g. 4006 = 2003 * 2 = (Rader(2002) * 2) = (Rader(2*7*11*13) * 2)
+      if (plan.rader_n > 1 || n > MAX_RADER_FFT_SIZE) {
         plan.bluestein_n = next_fast_n(2 * n - 1);
         plan.stockham = plan_stockham_fft(plan.bluestein_n);
         return plan;
@@ -116,7 +122,7 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   if (n > MAX_SINGLE_FFT_SIZE) {
     throw std::runtime_error(
-        "fused GPU FFT is only implemented from 2 -> 2048");
+        "fused GPU FFT is only implemented from 2 -> 4096");
   }
 
   // Make sure that the array is contiguous and has stride 1 in the FFT dim

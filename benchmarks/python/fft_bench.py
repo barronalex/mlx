@@ -18,59 +18,65 @@ def bandwidth_gb(runtime_ms, system_size):
     return system_size * bytes_per_fft / runtime_ms * ms_per_s / bytes_per_gb
 
 
-def run_bench(system_size, fft_sizes):
-    def fft(x):
-        out = mx.fft.fft(x)
+def run_bench(system_size, fft_sizes, backend="mlx", dim=1):
+    def fft_mlx(x):
+        if dim == 1:
+            out = mx.fft.fft(x)
+        elif dim == 2:
+            out = mx.fft.fft2(x)
         mx.eval(out)
         return out
 
-    bandwidths = []
-    for n in fft_sizes:
-        x = mx.random.uniform(shape=(system_size // n, n)).astype(mx.float32)
-        x = x.astype(mx.complex64)
-        mx.eval(x)
-        runtime_ms = measure_runtime(fft, x=x)
-        bandwidth = bandwidth_gb(runtime_ms, system_size // n * n)
-        print("bandwidth", n, bandwidth)
-        bandwidths.append(bandwidth)
-
-    return np.array(bandwidths)
-
-
-def run_bench_mps(system_size, fft_sizes):
-    def fft(x):
-        out = torch.fft.fft(x)
+    def fft_mps(x):
+        if dim == 1:
+            out = torch.fft.fft(x)
+        elif dim == 2:
+            out = torch.fft.fft2(x)
         torch.mps.synchronize()
         return out
 
     bandwidths = []
     for n in fft_sizes:
-        x_np = np.random.uniform(size=(system_size // n, n)).astype(np.complex64)
-        x = torch.tensor(x_np, device="mps")
-        torch.mps.synchronize()
-
+        batch_size = system_size // n**dim
+        shape = [batch_size] + [n for _ in range(dim)]
+        if backend == "mlx":
+            x = mx.random.uniform(shape=shape).astype(mx.float32)
+            x = x.astype(mx.complex64)
+            mx.eval(x)
+            fft = fft_mlx
+        elif backend == "mps":
+            x_np = np.random.uniform(size=(system_size // n, n)).astype(np.complex64)
+            x = torch.tensor(x_np, device="mps")
+            torch.mps.synchronize()
+            fft = fft_mps
+        else:
+            raise NotImplementedError()
         runtime_ms = measure_runtime(fft, x=x)
-        bandwidth = bandwidth_gb(runtime_ms, system_size // n * n)
-        print("bandwidth", n, bandwidth)
+        bandwidth = bandwidth_gb(runtime_ms, np.prod(shape))
+        print(n, bandwidth)
         bandwidths.append(bandwidth)
 
     return np.array(bandwidths)
 
 
 def time_fft():
-    x = np.array(range(2, 128))
-    # x = [17, 19, 23, 29, 31, 37, 41, 43]
+    x = np.array(range(2, 512))
     system_size = int(2**26)
 
+    print("MLX GPU")
     with mx.stream(mx.gpu):
         gpu_bandwidths = run_bench(system_size=system_size, fft_sizes=x)
 
     np.save("gpu_bandwidths", gpu_bandwidths)
 
-    mps_bandwidths = run_bench_mps(system_size=system_size, fft_sizes=x)
+    print("MPS GPU")
+    mps_bandwidths = run_bench(
+        system_size=system_size, fft_sizes=x, dim=2, backend="mps"
+    )
 
     np.save("mps_bandwidths", mps_bandwidths)
 
+    print("CPU")
     system_size = int(2**21)
     with mx.stream(mx.cpu):
         cpu_bandwidths = run_bench(system_size=system_size, fft_sizes=x)

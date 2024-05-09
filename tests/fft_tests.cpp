@@ -8,26 +8,33 @@
 
 using namespace mlx::core;
 
+// Plan:
+// Get RFFT to work for all values
+// Check four step FFT + manual bluestein for big values
+
 TEST_CASE("test fft basics") {
   random::seed(7);
-  int n = 256;
-  // int batch_size = 1;
-  int batch_size = 131072 * 1024 / n;
+  int n = 13 * 13 * 11;
+  // int n = 13;
+  int batch_size = 1;
+  // int batch_size = 131072 * 1024 / n;
   // array x = tile(expand_dims(arange(n), 0), {batch_size, 1});
+  // array x = random::normal({batch_size, n});
   array x = random::normal({batch_size, n}) +
       complex64_t{0.0f, 1.0f} * random::normal({batch_size, n});
   x = astype(x, complex64);
   array y = fft::fft(x);
   std::cout << "y " << y << std::endl;
-  // std::cout << "y " << reshape(y, {14, 17}) << std::endl;
+  // std::cout << "y " << reshape(slice(y, {0, 1}, {1, 13}), {3, 4}) <<
+  // std::endl; std::cout << "y " << reshape(y, {11, 13, 4, 7}) << std::endl;
 
-  auto bench_fft = [&x]() { return fft::fft(x); };
-  TIME(bench_fft);
+  // auto bench_fft = [&x]() { return fft::fft(x); };
+  // TIME(bench_fft);
 
   set_default_device(Device::cpu);
   y = fft::fft(x);
   std::cout << "y " << y << std::endl;
-  // std::cout << "y " << reshape(slice(y, {0, 1}, {1, 11}), {5, 2}) <<
+  // std::cout << "y " << reshape(slice(y, {0, 1}, {1, 13}), {3, 4}) <<
   // std::endl;
 
   // array x(1.0);
