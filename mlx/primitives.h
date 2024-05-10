@@ -460,6 +460,25 @@ class AsStrided : public UnaryPrimitive {
   void eval(const std::vector<array>& inputs, array& out);
 };
 
+// TODO: replace with native operations once we have CPU float64 support
+class BluesteinFFTSetup : public Primitive {
+ public:
+  explicit BluesteinFFTSetup(Stream stream, int n)
+      : Primitive(stream), n_(n) {};
+
+  void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+  void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+      override;
+
+  DEFINE_PRINT(BluesteinFFTSetup)
+
+ private:
+  int n_;
+
+  void eval(const std::vector<array>& inputs, std::vector<array>& outputs);
+};
+
 class BitwiseBinary : public UnaryPrimitive {
  public:
   enum Op { And, Or, Xor, LeftShift, RightShift };
@@ -948,6 +967,16 @@ class Expm1 : public UnaryPrimitive {
   void eval(const std::vector<array>& inputs, array& out);
 };
 
+struct FFTPlan {
+  // List of radices in Stockham decomposition
+  std::vector<int> stockham;
+  // List of radices in Rader decomposition
+  std::vector<int> rader;
+  // Rader factor, 1 if no rader factors
+  int rader_n = 1;
+  int bluestein_n = -1;
+};
+
 class FFT : public UnaryPrimitive {
  public:
   explicit FFT(
@@ -965,6 +994,14 @@ class FFT : public UnaryPrimitive {
   DEFINE_PRINT(FFT)
 
   bool is_equivalent(const Primitive& other) const override;
+
+  // GPU FFT planning
+  static int next_fast_n(int n);
+  static FFTPlan plan_fft(int n);
+  inline static const std::vector<int> supported_radices() {
+    // Ordered by preference in decomposition.
+    return {13, 11, 8, 7, 5, 4, 3, 2};
+  }
 
  private:
   std::vector<size_t> axes_;
