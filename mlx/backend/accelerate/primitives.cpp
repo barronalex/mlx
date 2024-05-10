@@ -243,14 +243,13 @@ void BluesteinFFTSetup::eval_cpu(
   // in double precision for the overall numerical stability
   // of Bluestein's FFT algorithm to be acceptable.
   //
-  // MLX currently support float64, so instead we
+  // MLX doesn't currently support float64, so instead we
   // manually implement the required operations using accelerate.
   //
   // In numpy:
   // w_k = np.exp(-1j * np.pi / N * (np.arange(-N + 1, N) ** 2))
   // w_q = np.fft.fft(1/w_k)
   // return w_k, w_q
-  //
   assert(inputs.size() == 0);
 
   auto& w_q = outputs[0];

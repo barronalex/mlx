@@ -70,9 +70,7 @@ def time_fft():
     np.save("gpu_bandwidths", gpu_bandwidths)
 
     print("MPS GPU")
-    mps_bandwidths = run_bench(
-        system_size=system_size, fft_sizes=x, dim=2, backend="mps"
-    )
+    mps_bandwidths = run_bench(system_size=system_size, fft_sizes=x, backend="mps")
 
     np.save("mps_bandwidths", mps_bandwidths)
 

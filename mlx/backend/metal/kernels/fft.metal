@@ -13,16 +13,18 @@
 
 using namespace metal;
 
-#define MAX_OUTPUT_SIZE 16
 #define MAX_ELEMS_PER_THREAD 8
 #define MAX_RADIX 13
+// Reached when elems_per_thread_ = 8, max_radix = 11/13
+// and some threads have to do 2 radix 8s requiring 16 float2s.
+#define MAX_OUTPUT_SIZE 16
 
 // Specialize for a particular value of N at runtime
 constant bool inv_ [[function_constant(0)]];
 constant bool is_power_of_2_ [[function_constant(1)]];
 constant int elems_per_thread_ [[function_constant(2)]];
-// Signal which radices we need to read/write to global memory on
-constant bool is_rader_ [[function_constant(3)]];
+// rader_m = n / rader_n
+constant int rader_m_ [[function_constant(3)]];
 // Stockham steps
 constant int radix_13_steps_ [[function_constant(4)]];
 constant int radix_11_steps_ [[function_constant(5)]];
@@ -41,7 +43,6 @@ constant int rader_5_steps_ [[function_constant(16)]];
 constant int rader_4_steps_ [[function_constant(17)]];
 constant int rader_3_steps_ [[function_constant(18)]];
 constant int rader_2_steps_ [[function_constant(19)]];
-constant int rader_m_ [[function_constant(20)]];
 
 METAL_FUNC float2 complex_mul(float2 a, float2 b) {
   return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
@@ -59,18 +60,16 @@ METAL_FUNC float2 get_twiddle(int k, int p) {
   return twiddle;
 }
 
-typedef void (*RadixFunc)(thread float2*, thread float2*);
+/* Radix kernels
 
-// Radix kernels
-//
-// We provide optimized, single threaded Radix codelets
-// for n=2,3,4,5,6,7,8,10,11,12,13.
-//
-// For n=2,3,4,5,6 we hand write the codelets.
-// For n=8,10,12 we combine smaller codelets.
-// For n=7,11,13 we use Rader's algorithm which decomposes
-// them into (n-1)=6,10,12 codelets.
+We provide optimized, single threaded Radix codelets
+for n=2,3,4,5,6,7,8,10,11,12,13.
 
+For n=2,3,4,5,6 we hand write the codelets.
+For n=8,10,12 we combine smaller codelets.
+For n=7,11,13 we use Rader's algorithm which decomposes
+them into (n-1)=6,10,12 codelets.
+*/
 METAL_FUNC void radix2(thread float2* x, thread float2* y) {
   y[0] = x[0] + x[1];
   y[1] = x[0] - x[1];
@@ -365,6 +364,9 @@ METAL_FUNC void radix13(thread float2* x, thread float2* y) {
   y[2] = x[12] * inv + x[0];
 }
 
+typedef void (*RadixFunc)(thread float2*, thread float2*);
+
+// Perform a single radix n butterfly with appropriate twiddles
 template <int radix, RadixFunc radix_func>
 METAL_FUNC void radix_n(
     int i,
@@ -375,7 +377,6 @@ METAL_FUNC void radix_n(
   // i: the index in the overall DFT that we're processing.
   // p: the size of the DFTs we're merging at this step.
   // m: how many threads are working on this DFT.
-
   int k, j;
 
   // Use faster bitwise operations when working with powers of two
@@ -410,8 +411,10 @@ METAL_FUNC void radix_n(
   }
 }
 
+// Perform all the radix steps required for a
+// particular radix size n.
 template <int radix, RadixFunc radix_func>
-METAL_FUNC void radix_n_step(
+METAL_FUNC void radix_n_steps(
     int i,
     thread int* p,
     int m,
@@ -422,6 +425,13 @@ METAL_FUNC void radix_n_step(
     thread float2* values,
     threadgroup float2* read_buf) {
   int m_r = n / radix;
+  // When combining different sized radices, we have to do
+  // multiple butterflies in a single thread.
+  // E.g. n = 28 = 4 * 7
+  // 4 threads, 7 elems_per_thread
+  // All threads do 1 radix7 butterfly.
+  // 3 threads do 2 radix4 butterflies.
+  // 1 thread does 1 radix4 butterfly.
   int max_radices_per_thread = (elems_per_thread_ + radix - 1) / radix;
 
   int index = 0;
@@ -458,40 +468,48 @@ METAL_FUNC void radix_n_step(
 }
 
 #define RADIX_STEP(radix, radix_func, num_steps) \
-  radix_n_step<radix, radix_func>(               \
-      fft_idx, &p, m, n, num_steps, inputs, indices, values, read_buf);
+  radix_n_steps<radix, radix_func>(              \
+      fft_idx, p, m, n, num_steps, inputs, indices, values, read_buf);
 
-#define RADER_STEP(radix, radix_func, num_steps) \
-  radix_n_step<radix, radix_func>(               \
-      fft_idx,                                   \
-      &p,                                        \
-      m,                                         \
-      n - rader_m,                               \
-      num_steps,                                 \
-      inputs,                                    \
-      indices,                                   \
-      values,                                    \
-      read_buf + rader_m);
+METAL_FUNC void radix_fft(
+    int fft_idx,
+    thread int* p,
+    int m,
+    int n,
+    threadgroup float2* read_buf) {
+  float2 inputs[MAX_RADIX];
+  short indices[MAX_OUTPUT_SIZE];
+  float2 values[MAX_OUTPUT_SIZE];
 
-#define RADIX_STEPS()                       \
-  RADIX_STEP(2, radix2, radix_2_steps_);    \
-  RADIX_STEP(3, radix3, radix_3_steps_);    \
-  RADIX_STEP(4, radix4, radix_4_steps_);    \
-  RADIX_STEP(5, radix5, radix_5_steps_);    \
-  RADIX_STEP(7, radix7, radix_7_steps_);    \
-  RADIX_STEP(8, radix8, radix_8_steps_);    \
-  RADIX_STEP(11, radix11, radix_11_steps_); \
+  RADIX_STEP(2, radix2, radix_2_steps_);
+  RADIX_STEP(3, radix3, radix_3_steps_);
+  RADIX_STEP(4, radix4, radix_4_steps_);
+  RADIX_STEP(5, radix5, radix_5_steps_);
+  RADIX_STEP(7, radix7, radix_7_steps_);
+  RADIX_STEP(8, radix8, radix_8_steps_);
+  RADIX_STEP(11, radix11, radix_11_steps_);
   RADIX_STEP(13, radix13, radix_13_steps_);
+}
 
-#define RADER_STEPS()                       \
-  RADER_STEP(2, radix2, rader_2_steps_);    \
-  RADER_STEP(3, radix3, rader_3_steps_);    \
-  RADER_STEP(4, radix4, rader_4_steps_);    \
-  RADER_STEP(5, radix5, rader_5_steps_);    \
-  RADER_STEP(7, radix7, rader_7_steps_);    \
-  RADER_STEP(8, radix8, rader_8_steps_);    \
-  RADER_STEP(11, radix11, rader_11_steps_); \
-  RADER_STEP(13, radix13, rader_13_steps_);
+METAL_FUNC void rader_fft(
+    int fft_idx,
+    thread int* p,
+    int m,
+    int n,
+    threadgroup float2* read_buf) {
+  float2 inputs[MAX_RADIX];
+  short indices[MAX_OUTPUT_SIZE];
+  float2 values[MAX_OUTPUT_SIZE];
+
+  RADIX_STEP(2, radix2, rader_2_steps_);
+  RADIX_STEP(3, radix3, rader_3_steps_);
+  RADIX_STEP(4, radix4, rader_4_steps_);
+  RADIX_STEP(5, radix5, rader_5_steps_);
+  RADIX_STEP(7, radix7, rader_7_steps_);
+  RADIX_STEP(8, radix8, rader_8_steps_);
+  RADIX_STEP(11, radix11, rader_11_steps_);
+  RADIX_STEP(13, radix13, rader_13_steps_);
+}
 
 // Each FFT is computed entirely in shared GPU memory.
 //
@@ -521,10 +539,6 @@ template <int tg_mem_size>
     return;
   }
 
-  float2 inputs[MAX_RADIX];
-  short indices[MAX_OUTPUT_SIZE];
-  float2 values[MAX_OUTPUT_SIZE];
-
   for (int e = 0; e < elems_per_thread_; e++) {
     int index = metal::min(fft_idx + e * m, n - 1);
     read_buf[index] = in[batch_idx + index];
@@ -535,11 +549,8 @@ template <int tg_mem_size>
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  // p is different
-  // that must be breaking something
-
   int p = 1;
-  RADIX_STEPS()
+  radix_fft(fft_idx, &p, m, n, read_buf);
 
   // Write to device
   float2 inv_factor = {1.0f / n, -1.0f / n};
@@ -565,6 +576,29 @@ template <int tg_mem_size>
     constant const int& rader_n,
     uint3 elem [[thread_position_in_grid]],
     uint3 grid [[threads_per_grid]]) {
+  // Use Rader's algorithm to compute fast FFTs
+  // when a prime factor `p` of `n` is greater than 13 but
+  // has `p - 1` Stockham decomposable into to prime factors <= 13.
+  //
+  // E.g. n = 102
+  //        = 2 * 3 * 17
+  // .      = 2 * 3 * RADER(16)
+  // .      = 2 * 3 * RADER(4 * 4)
+  //
+  // In numpy:
+  //   x_perm = x[g_q]
+  //   y = np.fft.fft(x_perm) * b_q
+  //   z = np.fft.ifft(y) + x[0]
+  //   out = z[g_minus_q]
+  //   out[0]  = x[1:].sum()
+  //
+  // Where the g_q and g_minus_q are permutations formed
+  // by the group under multiplicative modulo N using the
+  // primitive root of N and b_q is a constant.
+  // See https://en.wikipedia.org/wiki/Rader%27s_FFT_algorithm
+  //
+  // Rader's uses fewer operations than Bluestein's and so
+  // is more accurate. It's also faster in most cases.
   int fft_idx = elem.z;
   int tg_idx = elem.y * n;
   int batch_idx = elem.x * grid.y * n + tg_idx;
@@ -580,25 +614,14 @@ template <int tg_mem_size>
     return;
   }
 
-  float2 inputs[MAX_RADIX];
-  short indices[MAX_OUTPUT_SIZE];
-  float2 values[MAX_OUTPUT_SIZE];
-
   // rader_m = n / rader_n;
   int rader_m = rader_m_;
-
-  int index = 0;
-  short g_q_index = 0;
-  short g_q = 0;
-  short out_index = 0;
-  short diff_index = 0;
-  short interleaved_index = 0;
 
   int max_index = n - rader_m - 1;
 
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(fft_idx * elems_per_thread_ + e, max_index);
-    g_q = raders_g_q[index / rader_m];
+    short index = metal::min(fft_idx * elems_per_thread_ + e, max_index);
+    short g_q = raders_g_q[index / rader_m];
     read_buf[index + rader_m] =
         in[batch_idx + rader_m + (g_q - 1) * rader_m + index % rader_m];
     if (inv_) {
@@ -609,7 +632,8 @@ template <int tg_mem_size>
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   int p = 1;
-  RADER_STEPS()
+  // Rader FFT on x[1:]
+  rader_fft(fft_idx, &p, m, n - rader_m, read_buf + rader_m);
 
   // x_1 + ... + x_n is computed for us in the first FFT step so
   // we save it in the first rader_m indices of the array for later.
@@ -619,8 +643,9 @@ template <int tg_mem_size>
   float2 temp[MAX_ELEMS_PER_THREAD];
   float2 inv = {1.0f, -1.0f};
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(fft_idx * elems_per_thread_ + e, max_index);
-    interleaved_index = index / rader_m + (index % rader_m) * (rader_n - 1);
+    short index = metal::min(fft_idx * elems_per_thread_ + e, max_index);
+    short interleaved_index =
+        index / rader_m + (index % rader_m) * (rader_n - 1);
     temp[e] = complex_mul(
         read_buf[rader_m + interleaved_index],
         raders_b_q[interleaved_index % (rader_n - 1)]);
@@ -629,14 +654,15 @@ template <int tg_mem_size>
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(fft_idx * elems_per_thread_ + e, max_index);
+    short index = metal::min(fft_idx * elems_per_thread_ + e, max_index);
     read_buf[rader_m + index] = temp[e] * inv;
   }
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   p = 1;
-  RADER_STEPS()
+  // Rader IFFT on x[1:]
+  rader_fft(fft_idx, &p, m, n - rader_m, read_buf + rader_m);
 
   short x_0_index =
       metal::min(fft_idx * elems_per_thread_ / (rader_n - 1), rader_m - 1);
@@ -644,7 +670,7 @@ template <int tg_mem_size>
   // elems_per_thread_ crosses a boundary.
   // E.g. with n = 34, rader_n = 17, elems_per_thread_ = 4
   // 0 0 0 0 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 5 5 5 5 6 6 6 6 7 7 7 7 8 8
-  // x x x x x x x x x x x x x x x x x - - - - - - - - - - - - - - - - -
+  // 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1
   float2 x_0[2] = {in[batch_idx + x_0_index], in[batch_idx + x_0_index + 1]};
   if (inv_) {
     x_0[0].y = -x_0[0].y;
@@ -654,8 +680,8 @@ template <int tg_mem_size>
   float2 rader_inv_factor = {1.0f / (rader_n - 1), -1.0f / (rader_n - 1)};
 
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(fft_idx * elems_per_thread_ + e, n - rader_m - 1);
-    diff_index = index / (rader_n - 1) - x_0_index;
+    short index = metal::min(fft_idx * elems_per_thread_ + e, n - rader_m - 1);
+    short diff_index = index / (rader_n - 1) - x_0_index;
     temp[e] = read_buf[rader_m + index] * rader_inv_factor + x_0[diff_index];
   }
 
@@ -665,10 +691,10 @@ template <int tg_mem_size>
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(fft_idx * elems_per_thread_ + e, max_index);
-    g_q_index = index % (rader_n - 1);
-    g_q = raders_g_minus_q[g_q_index];
-    out_index = index - g_q_index + g_q + (index / (rader_n - 1));
+    short index = metal::min(fft_idx * elems_per_thread_ + e, max_index);
+    short g_q_index = index % (rader_n - 1);
+    short g_q = raders_g_minus_q[g_q_index];
+    short out_index = index - g_q_index + g_q + (index / (rader_n - 1));
     read_buf[out_index] = temp[e];
   }
 
@@ -677,12 +703,12 @@ template <int tg_mem_size>
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   p = rader_n;
-  RADIX_STEPS()
+  radix_fft(fft_idx, &p, m, n, read_buf);
 
   // Write to device
   float2 inv_factor = {1.0f / n, -1.0f / n};
   for (int e = 0; e < elems_per_thread_; e++) {
-    index = metal::min(fft_idx * elems_per_thread_ + e, n - 1);
+    short index = metal::min(fft_idx * elems_per_thread_ + e, n - 1);
     float2 elem = read_buf[index];
     if (inv_) {
       elem *= inv_factor;
@@ -705,12 +731,12 @@ template <int tg_mem_size>
   // Computes arbitrary length FFTs with Bluestein's algorithm
   //
   // In numpy:
-  //   out = w_k * np.fft.ifft(np.fft.fft(w_k * in, n) * w_q)
+  //   bluestein_n = next_power_of_2(2*n - 1)
+  //   out = w_k * np.fft.ifft(np.fft.fft(w_k * in, bluestein_n) * w_q)
   //
   // Where w_k and w_q are precomputed on CPU in high precision as:
   //   w_k = np.exp(-1j * np.pi / n * (np.arange(-n + 1, n) ** 2))
   //   w_q = np.fft.fft(1/w_k[-n:])
-
   int fft_idx = elem.z;
   int tg_idx = elem.y * n;
   int batch_idx = elem.x * grid.y * length + elem.y * length;
@@ -725,10 +751,6 @@ template <int tg_mem_size>
   if (grid_index >= batch_size) {
     return;
   }
-
-  float2 inputs[MAX_RADIX];
-  short indices[MAX_OUTPUT_SIZE];
-  float2 values[MAX_OUTPUT_SIZE];
 
   // load input into shared memory
   for (int t = 0; t < elems_per_thread_; t++) {
@@ -747,7 +769,7 @@ template <int tg_mem_size>
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   int p = 1;
-  RADIX_STEPS()
+  radix_fft(fft_idx, &p, m, n, read_buf);
 
   float2 inv = float2(1.0f, -1.0f);
   for (int t = 0; t < elems_per_thread_; t++) {
@@ -759,7 +781,7 @@ template <int tg_mem_size>
 
   // ifft
   p = 1;
-  RADIX_STEPS()
+  radix_fft(fft_idx, &p, m, n, read_buf);
 
   float2 inv_factor = {1.0f / n, -1.0f / n};
   float2 inv_factor_overall = {1.0f / length, -1.0f / length};
@@ -785,11 +807,13 @@ template <int tg_mem_size>
     constant const int& batch_size,
     uint3 elem [[thread_position_in_grid]],
     uint3 grid [[threads_per_grid]]) {
-  // For rfft, we interleave batches of two real sequences into one complex one:
+  // For RFFT, we interleave batches of two real sequences into one complex one:
+  //
   // z_k = x_k + j.y_k
   // X_k = (Z_k + Z_(N-k)*) / 2
   // Y_k = -j * ((Z_k - Z_(N-k)*) / 2)
-
+  //
+  // This roughly doubles the throughput over the regular FFT.
   int n_over_2 = (n / 2) + 1;
 
   int fft_idx = elem.z;
@@ -798,10 +822,6 @@ template <int tg_mem_size>
   int batch_idx_out = elem.x * grid.y * 2 * n_over_2 + elem.y * 2 * n_over_2;
 
   int m = grid.z;
-
-  float2 inputs[MAX_RADIX];
-  short indices[MAX_OUTPUT_SIZE];
-  float2 values[MAX_OUTPUT_SIZE];
 
   // Account for possible extra threadgroups
   int grid_index = elem.x * grid.y + elem.y;
@@ -829,7 +849,7 @@ template <int tg_mem_size>
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   int p = 1;
-  RADIX_STEPS()
+  radix_fft(fft_idx, &p, m, n, read_buf);
 
   float2 conj = {1, -1};
   float2 minus_j = {0, -1};
@@ -919,12 +939,6 @@ template <int tg_mem_size>
 // threadgroup memory size rather than using
 // `setThreadgroupMemoryLength` on the compute encoder.
 // For non-power of 2 sizes we round up the shared memory.
-instantiate_ffts(4)
-instantiate_ffts(8)
-instantiate_ffts(16)
-instantiate_ffts(32)
-instantiate_ffts(64)
-instantiate_ffts(128)
 instantiate_ffts(256)
 instantiate_ffts(512)
 instantiate_ffts(1024)

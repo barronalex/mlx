@@ -494,7 +494,6 @@ int mod_exp(int x, int y, int n) {
 }
 
 int primitive_root(int n) {
-  // Get all the prime factors of n
   auto factors = prime_factors(n - 1);
 
   for (int r = 2; r < n - 1; r++) {

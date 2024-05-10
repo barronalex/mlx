@@ -5,7 +5,6 @@
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
-#include <iostream>
 #include <set>
 
 namespace mlx::core {
@@ -16,6 +15,7 @@ using MTLFC = std::tuple<const void*, MTL::DataType, NS::UInteger>;
 #define MAX_RADER_FFT_SIZE 2048
 // Threadgroup memory batching improves throughput for small n
 #define MIN_THREADGROUP_MEM_SIZE 256
+// Higher elems per thread hit memory bandwidth bottlenecks
 #define MAX_ELEMS_PER_THREAD 8
 
 int FFT::next_fast_n(int n) {
@@ -222,16 +222,11 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
       elems_per_thread = std::max(elems_per_thread, radices[i]);
     }
   }
-  // Higher elems per thread hit memory bandwidth bottlenecks
   elems_per_thread = std::min(elems_per_thread, MAX_ELEMS_PER_THREAD);
   func_consts.push_back(make_int(&elems_per_thread, 2));
 
   int rader_m = n / plan.rader_n;
-  func_consts.push_back(make_int(&rader_m, 20));
-
-  // Compute which one is the first radix
-  bool is_rader = plan.rader_n > 1;
-  func_consts.push_back(make_bool(&is_rader, 3));
+  func_consts.push_back(make_int(&rader_m, 3));
 
   // The overall number of FFTs we're going to compute for this input
   int total_batch_size = in.size() / in.shape(axes_[0]);
@@ -297,12 +292,6 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
       compute_encoder->setBytes(&n, sizeof(int), 2);
       compute_encoder->setBytes(&total_batch_size, sizeof(int), 3);
     }
-
-    // std::cout << "fft size " << fft_size << std::endl;
-    // std::cout << "threads per fft " << threads_per_fft << std::endl;
-    // std::cout << "elems per thread " << elems_per_thread << std::endl;
-    // std::cout << "threadgroup batch size " << threadgroup_batch_size <<
-    // std::endl; std::cout << "batch size " << batch_size << std::endl;
 
     auto group_dims = MTL::Size(1, threadgroup_batch_size, threads_per_fft);
     auto grid_dims =
