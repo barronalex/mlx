@@ -315,11 +315,14 @@ array gpu_irfft(const array& a, int n, int axis, StreamOrDevice s) {
   std::vector<int> starts(a.ndim(), 0);
   std::vector<int> ends(a.shape());
   std::vector<int> steps(a.ndim(), 1);
-  starts[axis] = n % 2 == 0 ? -2 : -1;
-  ends[axis] = 0;
-  steps[axis] = -1;
-  array conj = conjugate(slice(a, starts, ends, steps, s), s);
-  array in = concatenate({a, conj}, axis, s);
+  array in = a;
+  if (n != 2) {
+    starts[axis] = n % 2 == 0 ? -2 : -1;
+    ends[axis] = 0;
+    steps[axis] = -1;
+    array conj = conjugate(slice(a, starts, ends, steps, s), s);
+    in = concatenate({a, conj}, axis, s);
+  }
   array out = fft_impl(
       in,
       {n},
