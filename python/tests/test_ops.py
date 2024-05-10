@@ -1217,6 +1217,55 @@ class TestOps(mlx_tests.MLXTestCase):
                         y_ = mx.array(x_)
                         test_ops(getattr(np, op), getattr(mx, op), x_, y_, atol)
 
+    def test_unary_ops_from_non_array(self):
+        unary_ops = [
+            "abs",
+            "exp",
+            "log",
+            "square",
+            "sqrt",
+            "sin",
+            "cos",
+            "tan",
+            "sinh",
+            "cosh",
+            "tanh",
+            "sign",
+            "negative",
+            "expm1",
+            "arcsin",
+            "arccos",
+            "arctan",
+            "arcsinh",
+            "arctanh",
+            "degrees",
+            "radians",
+            "log2",
+            "log10",
+            "log1p",
+            "floor",
+            "ceil",
+            "conjugate",
+        ]
+
+        x = 0.5
+        x_np = np.random.rand(10).astype(np.float32)
+        for op in unary_ops:
+            with self.subTest(op=op):
+                # Test from scalar
+                expected = getattr(np, op)(x)
+                out = getattr(mx, op)(x)
+
+                # Check close
+                self.assertTrue(np.allclose(expected, out, equal_nan=True))
+
+                # Test from NumPy
+                expected = getattr(np, op)(x_np)
+                out = getattr(mx, op)(x_np)
+
+                # Check close
+                self.assertTrue(np.allclose(expected, np.array(out), equal_nan=True))
+
     def test_trig_ops(self):
         def test_ops(npop, mlxop, x, y, atol):
             r_np = npop(x)
@@ -1273,6 +1322,7 @@ class TestOps(mlx_tests.MLXTestCase):
             "arcsin": lambda primal, cotan: cotan / np.sqrt(1.0 - primal**2),
             "arccos": lambda primal, cotan: -cotan / np.sqrt(1.0 - primal**2),
             "arctan": lambda primal, cotan: cotan / (1.0 + primal**2),
+            "arctan2": lambda primal, cotan: cotan / (1.0 + primal**2),
             "arcsinh": lambda primal, cotan: cotan / np.sqrt(primal**2 + 1),
             "arccosh": lambda primal, cotan: cotan / np.sqrt(primal**2 - 1),
             "arctanh": lambda primal, cotan: cotan / (1.0 - primal**2),
@@ -2208,6 +2258,19 @@ class TestOps(mlx_tests.MLXTestCase):
                 out_mlx = getattr(mx, op)(a_mlx, b_mlx)
                 out_np = getattr(np, op)(a_np, b_np)
                 self.assertTrue(np.array_equal(np.array(out_mlx), out_np))
+
+    def test_conjugate(self):
+        shape = (3, 5, 7)
+        a = np.random.normal(size=shape) + 1j * np.random.normal(size=shape)
+        a = a.astype(np.complex64)
+        ops = ["conjugate", "conj"]
+        for op in ops:
+            out_mlx = getattr(mx, op)(mx.array(a))
+            out_np = getattr(np, op)(a)
+            self.assertTrue(np.array_equal(np.array(out_mlx), out_np))
+        out_mlx = mx.array(a).conj()
+        out_np = a.conj()
+        self.assertTrue(np.array_equal(np.array(out_mlx), out_np))
 
 
 if __name__ == "__main__":

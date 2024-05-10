@@ -19,6 +19,7 @@ Operations
    arcsin
    arcsinh
    arctan
+   arctan2
    arctanh
    argmax
    argmin
@@ -32,10 +33,13 @@ Operations
    bitwise_or
    bitwise_xor
    block_masked_mm
+   block_sparse_mm
    broadcast_to
    ceil
    clip
    concatenate
+   conj
+   conjugate
    convolve
    conv1d
    conv2d

@@ -314,6 +314,23 @@ class ArcTan : public UnaryPrimitive {
   void eval(const std::vector<array>& inputs, array& out);
 };
 
+class ArcTan2 : public UnaryPrimitive {
+ public:
+  explicit ArcTan2(Stream stream) : UnaryPrimitive(stream) {};
+
+  void eval_cpu(const std::vector<array>& inputs, array& out) override;
+  void eval_gpu(const std::vector<array>& inputs, array& out) override;
+
+  DEFINE_VMAP()
+  DEFINE_GRADS()
+  DEFINE_PRINT(ArcTan2)
+  DEFINE_DEFAULT_IS_EQUIVALENT()
+  DEFINE_INPUT_OUTPUT_SHAPE()
+
+ private:
+  void eval(const std::vector<array>& inputs, array& out);
+};
+
 class ArcTanh : public UnaryPrimitive {
  public:
   explicit ArcTanh(Stream stream) : UnaryPrimitive(stream) {};
@@ -504,6 +521,26 @@ class BlockMaskedMM : public UnaryPrimitive {
   void eval(const std::vector<array>& inputs, array& out);
 };
 
+class BlockSparseMM : public UnaryPrimitive {
+ public:
+  explicit BlockSparseMM(Stream stream) : UnaryPrimitive(stream) {};
+
+  void eval_cpu(const std::vector<array>& inputs, array& out) override;
+  void eval_gpu(const std::vector<array>& inputs, array& out) override;
+
+  std::vector<array> vjp(
+      const std::vector<array>& primals,
+      const std::vector<array>& cotangents,
+      const std::vector<int>& argnums,
+      const std::vector<array>& outputs) override;
+
+  DEFINE_PRINT(BlockSparseMM)
+  DEFINE_DEFAULT_IS_EQUIVALENT()
+
+ private:
+  void eval(const std::vector<array>& inputs, array& out);
+};
+
 class Broadcast : public UnaryPrimitive {
  public:
   explicit Broadcast(Stream stream, const std::vector<int>& shape)
@@ -609,7 +646,10 @@ class Conjugate : public UnaryPrimitive {
   void eval_cpu(const std::vector<array>& inputs, array& out) override;
   void eval_gpu(const std::vector<array>& inputs, array& out) override;
 
+  DEFINE_VMAP()
   DEFINE_PRINT(Conjugate)
+  DEFINE_DEFAULT_IS_EQUIVALENT()
+  DEFINE_INPUT_OUTPUT_SHAPE()
 
  private:
   void eval(const std::vector<array>& inputs, array& out);

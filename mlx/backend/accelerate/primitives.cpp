@@ -34,6 +34,7 @@ DEFAULT(ArgReduce)
 DEFAULT(ArgSort)
 DEFAULT(AsStrided)
 DEFAULT(BlockMaskedMM)
+DEFAULT(BlockSparseMM)
 DEFAULT(Broadcast)
 DEFAULT(Ceil)
 DEFAULT(Concatenate)
@@ -190,6 +191,26 @@ void ArcTan::eval_cpu(const std::vector<array>& inputs, array& out) {
     set_unary_output_data(in, out);
     int size = in.data_size();
     vvatanf(out.data<float>(), in.data<float>(), &size);
+  } else {
+    eval(inputs, out);
+  }
+}
+
+void ArcTan2::eval_cpu(const std::vector<array>& inputs, array& out) {
+  assert(inputs.size() == 2);
+  auto& a = inputs[0];
+  auto& b = inputs[1];
+  if (out.dtype() == float32 && a.flags().row_contiguous &&
+      b.flags().row_contiguous) {
+    if (a.is_donatable()) {
+      out.copy_shared_buffer(a);
+    } else if (b.is_donatable()) {
+      out.copy_shared_buffer(b);
+    } else {
+      out.set_data(allocator::malloc_or_wait(out.nbytes()));
+    }
+    int size = a.data_size();
+    vvatan2f(out.data<float>(), a.data<float>(), b.data<float>(), &size);
   } else {
     eval(inputs, out);
   }

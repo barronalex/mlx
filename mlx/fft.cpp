@@ -512,8 +512,6 @@ int primitive_root(int n) {
 }
 
 std::tuple<array, array, array> compute_raders_constants(int raders_n) {
-  // First figure out the raders_constant
-  // Calculate primitive root
   int proot = primitive_root(raders_n);
   // Fermat's little theorem
   int inv = mod_exp(proot, raders_n - 2, raders_n);

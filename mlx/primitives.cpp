@@ -402,6 +402,36 @@ std::pair<std::vector<array>, std::vector<int>> ArcTan::vmap(
   return {{arctan(inputs[0], stream())}, axes};
 }
 
+std::vector<array> ArcTan2::vjp(
+    const std::vector<array>& primals,
+    const std::vector<array>& cotangents,
+    const std::vector<int>& argnums,
+    const std::vector<array>&) {
+  return jvp(primals, cotangents, argnums);
+}
+
+std::vector<array> ArcTan2::jvp(
+    const std::vector<array>& primals,
+    const std::vector<array>& tangents,
+    const std::vector<int>& argnums) {
+  assert(primals.size() == 2);
+  assert(argnums.size() == 2);
+  array t =
+      add(square(primals[0], stream()), square(primals[1], stream()), stream());
+  return {
+      divide(tangents[0], t, stream()),
+      divide(negative(tangents[1], stream()), t, stream())};
+}
+
+std::pair<std::vector<array>, std::vector<int>> ArcTan2::vmap(
+    const std::vector<array>& inputs,
+    const std::vector<int>& axes) {
+  assert(inputs.size() == 2);
+  assert(axes.size() == 2);
+  auto [a, b, to_ax] = vmap_binary_op(inputs, axes, stream());
+  return {{arctan2(a, b, stream())}, {to_ax}};
+}
+
 std::vector<array> ArcTanh::vjp(
     const std::vector<array>& primals,
     const std::vector<array>& cotangents,
@@ -757,6 +787,14 @@ std::pair<std::vector<array>, std::vector<int>> Concatenate::vmap(
 bool Concatenate::is_equivalent(const Primitive& other) const {
   const Concatenate& c_other = static_cast<const Concatenate&>(other);
   return axis_ == c_other.axis_;
+}
+
+std::pair<std::vector<array>, std::vector<int>> Conjugate::vmap(
+    const std::vector<array>& inputs,
+    const std::vector<int>& axes) {
+  assert(inputs.size() == 1);
+  assert(axes.size() == 1);
+  return {{conjugate(inputs[0], stream())}, axes};
 }
 
 array conv_weight_backward_patches(
@@ -3357,7 +3395,61 @@ std::vector<array> BlockMaskedMM::vjp(
 
       vjps.push_back(grad);
     } else {
-      vjps.push_back(zeros_like(primals[arg], stream()));
+      throw std::invalid_argument(
+          "[BlockMaskedMM] Cannot calculate VJP with respect to masks.");
+    }
+  }
+  return vjps;
+}
+
+std::vector<array> BlockSparseMM::vjp(
+    const std::vector<array>& primals,
+    const std::vector<array>& cotangents,
+    const std::vector<int>& argnums,
+    const std::vector<array>&) {
+  std::vector<array> vjps;
+  auto& cotan = cotangents[0];
+
+  auto& lhs_indices = primals[2];
+  auto& rhs_indices = primals[3];
+
+  int M = cotan.shape(-2);
+  int N = cotan.shape(-1);
+  int K = primals[0].shape(-1);
+
+  for (auto arg : argnums) {
+    if (arg == 0) {
+      // M X N * (K X N).T -> M X K
+      auto base = zeros_like(primals[0], stream());
+      auto bt = swapaxes(primals[1], -1, -2, stream());
+
+      auto base_shape = base.shape();
+      base = reshape(base, {-1, M, K}, stream());
+
+      // g : (out_batch_shape) + (M, K)
+      auto g = block_sparse_mm(cotan, bt, std::nullopt, rhs_indices, stream());
+      g = expand_dims(g, -3, stream());
+      auto gacc = scatter_add(base, lhs_indices, g, 0, stream());
+
+      vjps.push_back(reshape(gacc, base_shape, stream()));
+
+    } else if (arg == 1) {
+      // (M X K).T * M X N -> K X N
+      auto base = zeros_like(primals[1], stream());
+      auto at = swapaxes(primals[0], -1, -2, stream());
+
+      auto base_shape = base.shape();
+      base = reshape(base, {-1, K, N}, stream());
+
+      // g : (out_batch_shape) + (K, N)
+      auto g = block_sparse_mm(at, cotan, lhs_indices, std::nullopt, stream());
+      g = expand_dims(g, -3, stream());
+      auto gacc = scatter_add(base, rhs_indices, g, 0, stream());
+
+      vjps.push_back(reshape(gacc, base_shape, stream()));
+    } else {
+      throw std::invalid_argument(
+          "[BlockSparseMM] Cannot calculate VJP with respect to indices.");
     }
   }
   return vjps;

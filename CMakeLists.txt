@@ -17,10 +17,12 @@ option(MLX_BUILD_PYTHON_BINDINGS "Build python bindings for mlx" OFF)
 option(MLX_BUILD_METAL "Build metal backend" ON)
 option(MLX_METAL_DEBUG "Enhance metal debug workflow" OFF)
 option(MLX_ENABLE_X64_MAC "Enable building for x64 macOS" OFF)
+option(MLX_BUILD_GGUF "Include support for GGUF format" ON)
+option(MLX_BUILD_SAFETENSORS "Include support for safetensors format" ON)
 option(BUILD_SHARED_LIBS "Build mlx as a shared library" OFF)
 
 if(NOT MLX_VERSION)
-  set(MLX_VERSION 0.12.0)
+  set(MLX_VERSION 0.13.0)
 endif()
 
 # --------------------- Processor tests -------------------------
@@ -94,7 +96,7 @@ elseif (MLX_BUILD_METAL)
   FetchContent_Declare(
     metal_cpp
     URL ${METAL_CPP_URL}
-    PATCH_COMMAND patch -N -i ${METAL_CPP_PATCH} || true
+    PATCH_COMMAND /usr/bin/patch -N -i ${METAL_CPP_PATCH} || true
   )
 
   FetchContent_MakeAvailable(metal_cpp)
