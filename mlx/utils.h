@@ -118,4 +118,11 @@ inline std::ostream& operator<<(std::ostream& os, const float16_t& v) {
 inline std::ostream& operator<<(std::ostream& os, const bfloat16_t& v) {
   return os << static_cast<float>(v);
 }
+
+std::vector<int> prime_factors(int n);
+int mod_exp(int x, int y, int n);
+int primitive_root(int n);
+bool is_power_of_2(int n);
+int next_power_of_2(int n);
+
 } // namespace mlx::core

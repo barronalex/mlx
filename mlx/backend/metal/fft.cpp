@@ -5,108 +5,15 @@
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
-#include <set>
-
 namespace mlx::core {
 
 using MTLFC = std::tuple<const void*, MTL::DataType, NS::UInteger>;
 
 #define MAX_SINGLE_FFT_SIZE 4096
-#define MAX_RADER_FFT_SIZE 2048
 // Threadgroup memory batching improves throughput for small n
 #define MIN_THREADGROUP_MEM_SIZE 256
 // Higher elems per thread hit memory bandwidth bottlenecks
 #define MAX_ELEMS_PER_THREAD 8
-
-int FFT::next_fast_n(int n) {
-  return next_power_of_2(n);
-}
-
-std::vector<int> prime_factors(int n) {
-  int z = 2;
-  std::vector<int> factors;
-  while (z * z <= n) {
-    if (n % z == 0) {
-      factors.push_back(z);
-      n /= z;
-    } else {
-      z++;
-    }
-  }
-  if (n > 1) {
-    factors.push_back(n);
-  }
-  return factors;
-}
-
-std::vector<int> plan_stockham_fft(int n) {
-  auto radices = FFT::supported_radices();
-  std::vector<int> plan(radices.size(), 0);
-  int orig_n = n;
-  if (n == 1) {
-    return plan;
-  }
-  for (int i = 0; i < radices.size(); i++) {
-    int radix = radices[i];
-    // Manually tuned radices for powers of 2
-    if (is_power_of_2(orig_n) && orig_n < 512 && radix > 4 && orig_n != 8) {
-      continue;
-    }
-    while (n % radix == 0) {
-      plan[i] += 1;
-      n /= radix;
-      if (n == 1) {
-        return plan;
-      }
-    }
-  }
-  throw std::runtime_error("Unplannable");
-}
-
-// Plan the sequence of radices
-FFTPlan FFT::plan_fft(int n) {
-  auto radices = FFT::supported_radices();
-  std::set<int> radices_set(radices.begin(), radices.end());
-
-  FFTPlan plan;
-  plan.rader = std::vector<int>(radices.size(), 0);
-  // A plan is a number of steps for each supported radix
-  auto factors = prime_factors(n);
-  int remaining_n = n;
-  for (int factor : factors) {
-    // Make sure the factor is a supported radix
-    if (radices_set.find(factor) == radices_set.end()) {
-      // We only support a single Rader factor currently
-      // TODO(alexbarron): We limit the maximum Rader size to 2048
-      // because the compiler starts doing strange things when it tries to
-      // compile rader's decompositions with multiple radix 7/11/13 codelets.
-      // e.g. 4006 = 2003 * 2 = (Rader(2002) * 2) = (Rader(2*7*11*13) * 2)
-      if (plan.rader_n > 1 || n > MAX_RADER_FFT_SIZE) {
-        plan.bluestein_n = next_fast_n(2 * n - 1);
-        plan.stockham = plan_stockham_fft(plan.bluestein_n);
-        return plan;
-      }
-      // See if we can use Rader's algorithm to Stockham decompose n - 1
-      auto rader_factors = prime_factors(factor - 1);
-      int last_factor = -1;
-      for (int rf : rader_factors) {
-        // We don't nest Rader's algorithm so if `factor - 1`
-        // isn't Stockham decomposable we give up and do Bluestein's.
-        if (radices_set.find(rf) == radices_set.end()) {
-          plan.bluestein_n = next_fast_n(2 * n - 1);
-          plan.stockham = plan_stockham_fft(plan.bluestein_n);
-          return plan;
-        }
-      }
-      plan.rader = plan_stockham_fft(factor - 1);
-      plan.rader_n = factor;
-      remaining_n /= factor;
-    }
-  }
-
-  plan.stockham = plan_stockham_fft(remaining_n);
-  return plan;
-}
 
 void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& s = stream();

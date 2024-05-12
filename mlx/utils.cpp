@@ -336,4 +336,62 @@ std::ostream& operator<<(std::ostream& os, const std::vector<int64_t>& v) {
   return os;
 }
 
+std::vector<int> prime_factors(int n) {
+  int z = 2;
+  std::vector<int> factors;
+  while (z * z <= n) {
+    if (n % z == 0) {
+      factors.push_back(z);
+      n /= z;
+    } else {
+      z++;
+    }
+  }
+  if (n > 1) {
+    factors.push_back(n);
+  }
+  return factors;
+}
+
+int mod_exp(int x, int y, int n) {
+  int out = 1;
+  while (y) {
+    if (y & 1) {
+      out = out * x % n;
+    }
+    y >>= 1;
+    x = x * x % n;
+  }
+  return out;
+}
+
+int primitive_root(int n) {
+  auto factors = prime_factors(n - 1);
+
+  for (int r = 2; r < n - 1; r++) {
+    bool found = true;
+    for (int factor : factors) {
+      if (mod_exp(r, (n - 1) / factor, n) == 1) {
+        found = false;
+        break;
+      }
+    }
+    if (found) {
+      return r;
+    }
+  }
+  return -1;
+}
+
+bool is_power_of_2(int n) {
+  return ((n & (n - 1)) == 0) && n != 0;
+}
+
+int next_power_of_2(int n) {
+  if (is_power_of_2(n)) {
+    return n;
+  }
+  return pow(2, std::ceil(std::log2(n)));
+}
+
 } // namespace mlx::core

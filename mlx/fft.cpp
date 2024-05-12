@@ -482,36 +482,6 @@ array four_step_fft(
   return out;
 }
 
-int mod_exp(int x, int y, int n) {
-  int out = 1;
-  while (y) {
-    if (y & 1) {
-      out = out * x % n;
-    }
-    y >>= 1;
-    x = x * x % n;
-  }
-  return out;
-}
-
-int primitive_root(int n) {
-  auto factors = prime_factors(n - 1);
-
-  for (int r = 2; r < n - 1; r++) {
-    bool found = true;
-    for (int factor : factors) {
-      if (mod_exp(r, (n - 1) / factor, n) == 1) {
-        found = false;
-        break;
-      }
-    }
-    if (found) {
-      return r;
-    }
-  }
-  return -1;
-}
-
 std::tuple<array, array, array> compute_raders_constants(int raders_n) {
   int proot = primitive_root(raders_n);
   // Fermat's little theorem
