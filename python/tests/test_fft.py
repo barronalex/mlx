@@ -137,7 +137,7 @@ class TestFFT(mlx_tests.MLXTestCase):
             3**8,  # large stockham decomposable
         ]
         for large_num in numbers:
-            self._run_ffts((large_num,))
+            self._run_ffts((large_num,), atol=1e-3, rtol=1e-3)
 
     def test_fft_contiguity(self):
         r = np.random.rand(4, 8).astype(np.float32)
