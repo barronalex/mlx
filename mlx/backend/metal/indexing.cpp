@@ -20,7 +20,12 @@ constexpr int METAL_MAX_INDEX_ARRAYS = 10;
 
 } // namespace
 
-void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
+void gather(
+    const std::vector<array>& inputs,
+    array& out,
+    const std::vector<int>& axes,
+    const std::vector<int>& slice_sizes,
+    const Stream& s) {
   auto& src = inputs[0];
   int nidx = inputs.size() - 1;
 
@@ -36,7 +41,6 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
     return;
   }
 
-  auto& s = stream();
   auto& d = metal::device(s.device);
 
   int idx_ndim = nidx ? inputs[1].ndim() : 0;
@@ -54,7 +58,7 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
   compute_encoder->setComputePipelineState(kernel);
 
   size_t slice_size = 1;
-  for (auto s : slice_sizes_) {
+  for (auto s : slice_sizes) {
     slice_size *= s;
   }
 
@@ -88,8 +92,8 @@ void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
   compute_encoder->setBytes(src.shape().data(), ndim * sizeof(int), 2);
   compute_encoder->setBytes(src.strides().data(), ndim * sizeof(size_t), 3);
   compute_encoder->setBytes(&ndim, sizeof(size_t), 4);
-  compute_encoder->setBytes(slice_sizes_.data(), ndim * sizeof(int), 5);
-  compute_encoder->setBytes(axes_.data(), nidx * sizeof(int), 6);
+  compute_encoder->setBytes(slice_sizes.data(), ndim * sizeof(int), 5);
+  compute_encoder->setBytes(axes.data(), nidx * sizeof(int), 6);
 
   // Set index info
   //
@@ -288,6 +292,11 @@ void Scatter::eval_gpu(const std::vector<array>& inputs, array& out) {
     MTL::Size group_dims = get_block_dims(upd_size, nthreads / upd_size, 1);
     compute_encoder.dispatchThreads(grid_dims, group_dims);
   }
+}
+
+void Gather::eval_gpu(const std::vector<array>& inputs, array& out) {
+  auto& s = stream();
+  gather(inputs, out, axes_, slice_sizes_, s);
 }
 
 } // namespace mlx::core

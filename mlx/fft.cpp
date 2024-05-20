@@ -14,15 +14,6 @@
 namespace mlx::core::fft {
 
 // Forward declarations
-array gpu_nd_fft(
-    const array& a,
-    std::vector<int> n,
-    const std::vector<size_t> axes,
-    bool real,
-    bool inverse,
-    std::vector<int> out_shape,
-    StreamOrDevice s);
-
 array gpu_irfft(const array& a, int n, int axis, StreamOrDevice s);
 
 array bluestein_fft(
@@ -127,69 +118,69 @@ array fft_impl(
 
   auto in_type = real && !inverse ? float32 : complex64;
   auto out_type = real && inverse ? float32 : complex64;
-  if (stream.device == Device::gpu) {
-    // Here are the code paths for GPU FFT:
-    // if rader_decomposable(N) && N <= MAX_STOCKHAM:
-    //     rader_stockham(N)
-    // else if N <= MAX_BLUESTEIN:
-    //     fused_bluestein()
-    // else if N > MAX_BLUESTEIN && largest_prime_factor(N) <= MAX_BLUESTEIN
-    //     four_step()
-    // else if N > MAX_BLUESTEIN && larget_prime_factor(N) > MAX_BLUESTEIN:
-    //     bluestein()
+  // if (stream.device == Device::gpu) {
+  //   // Here are the code paths for GPU FFT:
+  //   // if rader_decomposable(N) && N <= MAX_STOCKHAM:
+  //   //     rader_stockham(N)
+  //   // else if N <= MAX_BLUESTEIN:
+  //   //     fused_bluestein()
+  //   // else if N > MAX_BLUESTEIN && largest_prime_factor(N) <= MAX_BLUESTEIN
+  //   //     four_step()
+  //   // else if N > MAX_BLUESTEIN && larget_prime_factor(N) > MAX_BLUESTEIN:
+  //   //     bluestein()
 
-    if (valid_axes.size() > 1) {
-      return gpu_nd_fft(in, n, valid_axes, real, inverse, out_shape, s);
-    }
+  //   if (valid_axes.size() > 1) {
+  //     return gpu_nd_fft(in, n, valid_axes, real, inverse, out_shape, s);
+  //   }
 
-    // Guarranteed to be 1D now
-    int n_1d = n.back();
-    int axis = valid_axes[0];
+  //   // Guarranteed to be 1D now
+  //   int n_1d = n.back();
+  //   int axis = valid_axes[0];
 
-    if (n_1d == 1) {
-      return astype(a, complex64, s);
-    }
+  //   if (n_1d == 1) {
+  //     return astype(a, complex64, s);
+  //   }
 
-    if (out_type == float32) {
-      return gpu_irfft(a, n_1d, axis, s);
-    }
+  //   if (out_type == float32) {
+  //     return gpu_irfft(a, n_1d, axis, s);
+  //   }
 
-    FFTPlan plan = FFT::plan_fft(n_1d);
-    if (n_1d > MAX_STOCKHAM_FFT_SIZE || plan.bluestein_n > 0 ||
-        plan.rader_n > 1) {
-      array out = in;
-      // If we pass complex input to RFFT, we need to drop the complex part
-      // to mirror the CPU implementation.
-      array in_complex = astype(astype(in, in_type, s), complex64, s);
-      // If n is larger than the maximum bluestein or stockham size, use four
-      // step FFT
-      if (n_1d > MAX_STOCKHAM_FFT_SIZE ||
-          (n_1d > MAX_BLUESTEIN_FFT_SIZE && plan.bluestein_n > 0)) {
-        out = four_step_fft(in_complex, n_1d, axis, inverse, s);
-      } else if (plan.bluestein_n > 0) {
-        out = bluestein_fft(in_complex, n_1d, axis, inverse, s);
-      } else {
-        // Otherwise, we can use Rader's
-        auto [b_q, g_q, g_minus_q] = compute_raders_constants(plan.rader_n);
-        out = array(
-            in_shape,
-            out_type,
-            std::make_shared<FFT>(
-                stream, valid_axes, inverse, /* real= */ false),
-            {in_complex, b_q, g_q, g_minus_q});
-      }
+  //   FFTPlan plan = FFT::plan_fft(n_1d);
+  //   if (n_1d > MAX_STOCKHAM_FFT_SIZE || plan.bluestein_n > 0 ||
+  //       plan.rader_n > 1) {
+  //     array out = in;
+  //     // If we pass complex input to RFFT, we need to drop the complex part
+  //     // to mirror the CPU implementation.
+  //     array in_complex = astype(astype(in, in_type, s), complex64, s);
+  //     // If n is larger than the maximum bluestein or stockham size, use four
+  //     // step FFT
+  //     if (n_1d > MAX_STOCKHAM_FFT_SIZE ||
+  //         (n_1d > MAX_BLUESTEIN_FFT_SIZE && plan.bluestein_n > 0)) {
+  //       out = four_step_fft(in_complex, n_1d, axis, inverse, s);
+  //     } else if (plan.bluestein_n > 0) {
+  //       out = bluestein_fft(in_complex, n_1d, axis, inverse, s);
+  //     } else {
+  //       // Otherwise, we can use Rader's
+  //       auto [b_q, g_q, g_minus_q] = compute_raders_constants(plan.rader_n);
+  //       out = array(
+  //           in_shape,
+  //           out_type,
+  //           std::make_shared<FFT>(
+  //               stream, valid_axes, inverse, /* real= */ false),
+  //           {in_complex, b_q, g_q, g_minus_q});
+  //     }
 
-      if (in_type == float32) {
-        // Efficient RFFT is only implemented for Stockham decomposable n
-        // currently
-        std::vector<int> starts(in.ndim(), 0);
-        std::vector<int> ends(in.shape());
-        ends[axis] = n_1d / 2 + 1;
-        out = slice(out, starts, ends, s);
-      }
-      return out;
-    }
-  }
+  //     if (in_type == float32) {
+  //       // Efficient RFFT is only implemented for Stockham decomposable n
+  //       // currently
+  //       std::vector<int> starts(in.ndim(), 0);
+  //       std::vector<int> ends(in.shape());
+  //       ends[axis] = n_1d / 2 + 1;
+  //       out = slice(out, starts, ends, s);
+  //     }
+  //     return out;
+  //   }
+  // }
 
   return array(
       out_shape,
@@ -339,13 +330,15 @@ array bluestein_fft(
     int axis,
     bool inverse,
     StreamOrDevice s) {
-  int bluestein_n = FFT::next_fast_n(2 * n - 1);
+  // int bluestein_n = FFT::next_fast_n(2 * n - 1);
+  int bluestein_n = 256;
   // Precompute twiddle factors in high precision for Bluestein's
-  auto blue_outputs = array::make_arrays(
-      {{bluestein_n}, {n}},
-      {{complex64, complex64}},
-      std::make_shared<BluesteinFFTSetup>(to_stream(Device::cpu), n),
-      {});
+  auto blue_outputs = std::vector<array>();
+  // array::make_arrays(
+  //     {{bluestein_n}, {n}},
+  //     {{complex64, complex64}},
+  //     std::make_shared<BluesteinFFTSetup>(to_stream(Device::cpu), n),
+  //     {});
   // If N is small enough, use the fused implementation
   array w_q = blue_outputs[0];
   array w_k = blue_outputs[1];
@@ -398,23 +391,6 @@ array bluestein_fft(
     out = w_k * out;
     return out;
   }
-}
-
-std::vector<int> prime_factors(int n) {
-  int z = 2;
-  std::vector<int> factors;
-  while (z * z <= n) {
-    if (n % z == 0) {
-      factors.push_back(z);
-      n /= z;
-    } else {
-      z++;
-    }
-  }
-  if (n > 1) {
-    factors.push_back(n);
-  }
-  return factors;
 }
 
 // For n that doesn't fit into GPU shared memory, we use the 4 step FFT
@@ -480,32 +456,6 @@ array four_step_fft(
   array out = reshape(step_two, a.shape(), s);
   out = inverse ? conjugate(out) / n : out;
   return out;
-}
-
-std::tuple<array, array, array> compute_raders_constants(int raders_n) {
-  int proot = primitive_root(raders_n);
-  // Fermat's little theorem
-  int inv = mod_exp(proot, raders_n - 2, raders_n);
-  // Now get the g_minus_q sequence
-  std::vector<short> g_q(raders_n - 1);
-  std::vector<short> g_minus_q(raders_n - 1);
-  for (int i = 0; i < raders_n - 1; i++) {
-    g_q[i] = mod_exp(proot, i, raders_n);
-    g_minus_q[i] = mod_exp(inv, i, raders_n);
-  }
-  array g_q_arr(g_q.begin(), {raders_n - 1});
-  array g_minus_q_arr(g_minus_q.begin(), {raders_n - 1});
-  array b_q =
-      exp(complex64_t{0.0f, 2.0f} * astype(g_minus_q_arr, float32) / raders_n *
-          -M_PI);
-  array b_q_fft = fft_impl(
-      b_q,
-      {raders_n - 1},
-      {0},
-      /* real= */ false,
-      /* inverse= */ false,
-      Device::cpu);
-  return std::make_tuple(b_q_fft, g_q_arr, g_minus_q_arr);
 }
 
 } // namespace mlx::core::fft

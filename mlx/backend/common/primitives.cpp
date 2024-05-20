@@ -149,12 +149,6 @@ void AsStrided::eval(const std::vector<array>& inputs, array& out) {
   return out.copy_shared_buffer(in, strides_, flags, data_size, offset_);
 }
 
-void BluesteinFFTSetup::eval(
-    const std::vector<array>& inputs,
-    std::vector<array>& outputs) {
-  throw std::runtime_error("Bluestein is only implemented in accelerate.");
-}
-
 void Broadcast::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
@@ -680,49 +674,6 @@ void Sinh::eval(const std::vector<array>& inputs, array& out) {
   }
 }
 
-std::tuple<bool, int64_t, std::vector<int64_t>> Slice::prepare_slice(
-    const array& in) {
-  int64_t data_offset = 0;
-  bool copy_needed = false;
-  std::vector<int64_t> inp_strides(in.ndim(), 0);
-  for (int i = 0; i < in.ndim(); ++i) {
-    data_offset += start_indices_[i] * in.strides()[i];
-    inp_strides[i] = in.strides()[i] * strides_[i];
-
-    copy_needed |= strides_[i] < 0;
-  }
-
-  return std::make_tuple(copy_needed, data_offset, inp_strides);
-}
-
-void Slice::shared_buffer_slice(
-    const array& in,
-    const std::vector<size_t>& out_strides,
-    size_t data_offset,
-    array& out) {
-  // Compute row/col contiguity
-  auto [data_size, is_row_contiguous, is_col_contiguous] =
-      check_contiguity(out.shape(), out_strides);
-
-  auto flags = in.flags();
-  flags.row_contiguous = is_row_contiguous;
-  flags.col_contiguous = is_col_contiguous;
-
-  if (data_size == 1) {
-    // Broadcasted scalar array is contiguous.
-    flags.contiguous = true;
-  } else if (data_size == in.data_size()) {
-    // Means we sliced a broadcasted dimension so leave the "no holes" flag
-    // alone.
-  } else {
-    // We sliced something. So either we are row or col contiguous or we
-    // punched a hole.
-    flags.contiguous &= flags.row_contiguous || flags.col_contiguous;
-  }
-
-  out.copy_shared_buffer(in, out_strides, flags, data_size, data_offset);
-}
-
 void Slice::eval(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   if (out.size() == 0) {
@@ -731,27 +682,7 @@ void Slice::eval(const std::vector<array>& inputs, array& out) {
   }
 
   auto& in = inputs[0];
-
-  // Calculate out strides, initial offset and if copy needs to be made
-  auto [copy_needed, data_offset, inp_strides] = prepare_slice(in);
-
-  // Do copy if needed
-  if (copy_needed) {
-    out.set_data(allocator::malloc_or_wait(out.nbytes()));
-    std::vector<int64_t> ostrides{out.strides().begin(), out.strides().end()};
-    copy_inplace<int64_t>(
-        /* const array& src = */ in,
-        /* array& dst = */ out,
-        /* const std::vector<int>& data_shape = */ out.shape(),
-        /* const std::vector<stride_t>& i_strides = */ inp_strides,
-        /* const std::vector<stride_t>& o_strides = */ ostrides,
-        /* int64_t i_offset = */ data_offset,
-        /* int64_t o_offset = */ 0,
-        /* CopyType ctype = */ CopyType::General);
-  } else {
-    std::vector<size_t> ostrides{inp_strides.begin(), inp_strides.end()};
-    shared_buffer_slice(in, ostrides, data_offset, out);
-  }
+  slice_op(in, out, start_indices_, strides_);
 }
 
 std::tuple<int64_t, std::vector<int64_t>> SliceUpdate::prepare_slice(

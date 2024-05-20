@@ -4,7 +4,10 @@
 #include <numeric>
 #include <sstream>
 
+#include <iostream>
+
 #include "mlx/backend/common/binary.h"
+#include "mlx/backend/common/copy.h"
 #include "mlx/backend/common/ternary.h"
 #include "mlx/backend/metal/copy.h"
 #include "mlx/backend/metal/device.h"
@@ -15,14 +18,13 @@
 
 namespace mlx::core {
 
-namespace {
-
 constexpr int METAL_MAX_INDEX_ARRAYS = 10;
 
-void binary_op(
+void binary_op_gpu(
     const std::vector<array>& inputs,
     std::vector<array>& outputs,
-    const std::string op) {
+    const std::string op,
+    const Stream& s) {
   assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
@@ -65,7 +67,6 @@ void binary_op(
     kname << "_" << shape.size();
   }
 
-  auto& s = out.primitive().stream();
   auto& d = metal::device(s.device);
   auto kernel = d.get_kernel(kname.str());
   auto& compute_encoder = d.get_command_encoder(s.index);
@@ -121,10 +122,19 @@ void binary_op(
   }
 }
 
-void binary_op(
+void binary_op_gpu(
+    const std::vector<array>& inputs,
+    std::vector<array>& outputs,
+    const std::string op) {
+  auto& s = outputs[0].primitive().stream();
+  binary_op_gpu(inputs, outputs, op, s);
+}
+
+void binary_op_gpu(
     const std::vector<array>& inputs,
     array& out,
-    const std::string op) {
+    const std::string op,
+    const Stream& s) {
   assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
@@ -164,7 +174,6 @@ void binary_op(
     kname << "_" << shape.size();
   }
 
-  auto& s = out.primitive().stream();
   auto& d = metal::device(s.device);
   auto kernel = d.get_kernel(kname.str());
   auto& compute_encoder = d.get_command_encoder(s.index);
@@ -216,10 +225,19 @@ void binary_op(
   }
 }
 
-void ternary_op(
+void binary_op_gpu(
     const std::vector<array>& inputs,
     array& out,
     const std::string op) {
+  auto& s = out.primitive().stream();
+  binary_op_gpu(inputs, out, op, s);
+}
+
+void ternary_op_gpu(
+    const std::vector<array>& inputs,
+    array& out,
+    const std::string op,
+    const Stream& s) {
   assert(inputs.size() == 3);
   auto& a = inputs[0];
   auto& b = inputs[1];
@@ -250,7 +268,6 @@ void ternary_op(
     kname << op << type_to_name(b);
   }
 
-  auto& s = out.primitive().stream();
   auto& d = metal::device(s.device);
   auto kernel = d.get_kernel(kname.str());
   auto& compute_encoder = d.get_command_encoder(s.index);
@@ -302,10 +319,19 @@ void ternary_op(
   }
 }
 
-void unary_op(
+void ternary_op_gpu(
     const std::vector<array>& inputs,
     array& out,
     const std::string op) {
+  auto& s = out.primitive().stream();
+  ternary_op_gpu(inputs, out, op, s);
+}
+
+void unary_op_gpu(
+    const std::vector<array>& inputs,
+    array& out,
+    const std::string op,
+    const Stream& s) {
   auto& in = inputs[0];
   bool contig = in.flags().contiguous;
   if (contig) {
@@ -325,7 +351,6 @@ void unary_op(
     return;
   }
 
-  auto& s = out.primitive().stream();
   auto& d = metal::device(s.device);
   std::string tname = type_to_name(in);
   std::string opt_name = contig ? "v" : "g";
@@ -354,14 +379,52 @@ void unary_op(
   compute_encoder.dispatchThreads(grid_dims, group_dims);
 }
 
-} // namespace
+void unary_op_gpu(
+    const std::vector<array>& inputs,
+    array& out,
+    const std::string op) {
+  auto& s = out.primitive().stream();
+  unary_op_gpu(inputs, out, op, s);
+}
+
+void pad(
+    const array& in,
+    const array& val,
+    array& out,
+    std::vector<int> axes,
+    std::vector<int> low_pad_size,
+    const Stream& s) {
+  // Padding value must be a scalar
+  assert(val.size() == 1);
+
+  // Padding value, input and output must be of the same type
+  assert(val.dtype() == in.dtype() && in.dtype() == out.dtype());
+
+  // Fill output with val
+  copy_gpu(val, out, CopyType::Scalar, s);
+
+  // Find offset for start of input values
+  size_t data_offset = 0;
+  for (int i = 0; i < axes.size(); i++) {
+    auto ax = axes[i] < 0 ? out.ndim() + axes[i] : axes[i];
+    data_offset += out.strides()[ax] * low_pad_size[i];
+  }
+
+  // Extract slice from output where input will be pasted
+  array out_slice(in.shape(), out.dtype(), nullptr, {});
+  out_slice.copy_shared_buffer(
+      out, out.strides(), out.flags(), out_slice.size(), data_offset);
+
+  // Copy input values into the slice
+  copy_gpu_inplace(in, out_slice, CopyType::GeneralGeneral, s);
+}
 
 void Abs::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "abs");
+  unary_op_gpu(inputs, out, "abs");
 }
 
 void Add::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "add");
+  binary_op_gpu(inputs, out, "add");
 }
 
 template <typename T>
@@ -432,31 +495,31 @@ void Arange::eval_gpu(const std::vector<array>& inputs, array& out) {
 }
 
 void ArcCos::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "arccos");
+  unary_op_gpu(inputs, out, "arccos");
 }
 
 void ArcCosh::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "arccosh");
+  unary_op_gpu(inputs, out, "arccosh");
 }
 
 void ArcSin::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "arcsin");
+  unary_op_gpu(inputs, out, "arcsin");
 }
 
 void ArcSinh::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "arcsinh");
+  unary_op_gpu(inputs, out, "arcsinh");
 }
 
 void ArcTan::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "arctan");
+  unary_op_gpu(inputs, out, "arctan");
 }
 
 void ArcTan2::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "arctan2");
+  binary_op_gpu(inputs, out, "arctan2");
 }
 
 void ArcTanh::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "arctanh");
+  unary_op_gpu(inputs, out, "arctanh");
 }
 
 void ArgReduce::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -540,28 +603,21 @@ void AsStrided::eval_gpu(const std::vector<array>& inputs, array& out) {
 void BitwiseBinary::eval_gpu(const std::vector<array>& inputs, array& out) {
   switch (op_) {
     case BitwiseBinary::And:
-      binary_op(inputs, out, "bitwise_and");
+      binary_op_gpu(inputs, out, "bitwise_and");
       break;
     case BitwiseBinary::Or:
-      binary_op(inputs, out, "bitwise_or");
+      binary_op_gpu(inputs, out, "bitwise_or");
       break;
     case BitwiseBinary::Xor:
-      binary_op(inputs, out, "bitwise_xor");
+      binary_op_gpu(inputs, out, "bitwise_xor");
       break;
     case BitwiseBinary::LeftShift:
-      binary_op(inputs, out, "left_shift");
+      binary_op_gpu(inputs, out, "left_shift");
       break;
     case BitwiseBinary::RightShift:
-      binary_op(inputs, out, "right_shift");
+      binary_op_gpu(inputs, out, "right_shift");
       break;
   }
-}
-
-void BluesteinFFTSetup::eval_gpu(
-    const std::vector<array>& inputs,
-    std::vector<array>& outputs) {
-  throw std::runtime_error(
-      "No GPU impl for Bluestein FFT since it requires fp64");
 }
 
 void Broadcast::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -599,7 +655,7 @@ void Conjugate::eval_gpu(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
   if (out.dtype() == complex64) {
-    unary_op(inputs, out, "conj");
+    unary_op_gpu(inputs, out, "conj");
   } else {
     throw std::invalid_argument(
         "[conjugate] conjugate must be called on complex input.");
@@ -611,11 +667,11 @@ void Copy::eval_gpu(const std::vector<array>& inputs, array& out) {
 }
 
 void Cos::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "cos");
+  unary_op_gpu(inputs, out, "cos");
 }
 
 void Cosh::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "cosh");
+  unary_op_gpu(inputs, out, "cosh");
 }
 
 void CustomVJP::eval_gpu(
@@ -631,37 +687,37 @@ void Depends::eval_gpu(
 }
 
 void Divide::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "div");
+  binary_op_gpu(inputs, out, "div");
 }
 
 void DivMod::eval_gpu(
     const std::vector<array>& inputs,
     std::vector<array>& outputs) {
-  binary_op(inputs, outputs, "divmod");
+  binary_op_gpu(inputs, outputs, "divmod");
 }
 
 void Remainder::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "rem");
+  binary_op_gpu(inputs, out, "rem");
 }
 
 void Equal::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, equal_nan_ ? "naneq" : "eq");
+  binary_op_gpu(inputs, out, equal_nan_ ? "naneq" : "eq");
 }
 
 void Erf::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "erf");
+  unary_op_gpu(inputs, out, "erf");
 }
 
 void ErfInv::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "erfinv");
+  unary_op_gpu(inputs, out, "erfinv");
 }
 
 void Exp::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "exp");
+  unary_op_gpu(inputs, out, "exp");
 }
 
 void Expm1::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "expm1");
+  unary_op_gpu(inputs, out, "expm1");
 }
 
 void Full::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -678,19 +734,19 @@ void Full::eval_gpu(const std::vector<array>& inputs, array& out) {
 }
 
 void Greater::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "ge");
+  binary_op_gpu(inputs, out, "ge");
 }
 
 void GreaterEqual::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "geq");
+  binary_op_gpu(inputs, out, "geq");
 }
 
 void Less::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "le");
+  binary_op_gpu(inputs, out, "le");
 }
 
 void LessEqual::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "leq");
+  binary_op_gpu(inputs, out, "leq");
 }
 
 void Load::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -700,49 +756,49 @@ void Load::eval_gpu(const std::vector<array>& inputs, array& out) {
 void Log::eval_gpu(const std::vector<array>& inputs, array& out) {
   switch (base_) {
     case Base::e:
-      unary_op(inputs, out, "log");
+      unary_op_gpu(inputs, out, "log");
       break;
     case Base::two:
-      unary_op(inputs, out, "log2");
+      unary_op_gpu(inputs, out, "log2");
       break;
     case Base::ten:
-      unary_op(inputs, out, "log10");
+      unary_op_gpu(inputs, out, "log10");
       break;
   }
 }
 
 void Log1p::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "log1p");
+  unary_op_gpu(inputs, out, "log1p");
 }
 
 void LogicalNot::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "lnot");
+  unary_op_gpu(inputs, out, "lnot");
 }
 
 void LogicalAnd::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(
+  binary_op_gpu(
       inputs,
       out,
       "land"); // Assume "land" is the operation identifier for logical AND
 }
 
 void LogicalOr::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(
+  binary_op_gpu(
       inputs,
       out,
       "lor"); // Assume "lor" is the operation identifier for logical OR
 }
 
 void LogAddExp::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "lae");
+  binary_op_gpu(inputs, out, "lae");
 }
 
 void Maximum::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "max");
+  binary_op_gpu(inputs, out, "max");
 }
 
 void Minimum::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "min");
+  binary_op_gpu(inputs, out, "min");
 }
 
 void NumberOfElements::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -750,27 +806,27 @@ void NumberOfElements::eval_gpu(const std::vector<array>& inputs, array& out) {
 }
 
 void Floor::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "floor");
+  unary_op_gpu(inputs, out, "floor");
 }
 
 void Ceil::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "ceil");
+  unary_op_gpu(inputs, out, "ceil");
 }
 
 void Multiply::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "mul");
+  binary_op_gpu(inputs, out, "mul");
 }
 
 void Select::eval_gpu(const std::vector<array>& inputs, array& out) {
-  ternary_op(inputs, out, "select");
+  ternary_op_gpu(inputs, out, "select");
 }
 
 void Negative::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "neg");
+  unary_op_gpu(inputs, out, "neg");
 }
 
 void NotEqual::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "neq");
+  binary_op_gpu(inputs, out, "neq");
 }
 
 void Pad::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -779,33 +835,11 @@ void Pad::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& in = inputs[0];
   auto& val = inputs[1];
 
-  // Padding value must be a scalar
-  assert(val.size() == 1);
-
-  // Padding value, input and output must be of the same type
-  assert(val.dtype() == in.dtype() && in.dtype() == out.dtype());
-
-  // Fill output with val
-  copy_gpu(val, out, CopyType::Scalar, stream());
-
-  // Find offset for start of input values
-  size_t data_offset = 0;
-  for (int i = 0; i < axes_.size(); i++) {
-    auto ax = axes_[i] < 0 ? out.ndim() + axes_[i] : axes_[i];
-    data_offset += out.strides()[ax] * low_pad_size_[i];
-  }
-
-  // Extract slice from output where input will be pasted
-  array out_slice(in.shape(), out.dtype(), nullptr, {});
-  out_slice.copy_shared_buffer(
-      out, out.strides(), out.flags(), out_slice.size(), data_offset);
-
-  // Copy input values into the slice
-  copy_gpu_inplace(in, out_slice, CopyType::GeneralGeneral, stream());
+  pad(in, val, out, axes_, low_pad_size_, stream());
 }
 
 void Power::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "pow");
+  binary_op_gpu(inputs, out, "pow");
 }
 
 void RandomBits::eval_gpu(const std::vector<array>& inputs, array& out) {
@@ -872,7 +906,7 @@ void Round::eval_gpu(const std::vector<array>& inputs, array& out) {
   assert(inputs.size() == 1);
   const auto& in = inputs[0];
   if (issubdtype(in.dtype(), inexact)) {
-    unary_op(inputs, out, "round");
+    unary_op_gpu(inputs, out, "round");
   } else {
     // No-op integer types
     out.copy_shared_buffer(in);
@@ -880,19 +914,19 @@ void Round::eval_gpu(const std::vector<array>& inputs, array& out) {
 }
 
 void Sigmoid::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "sigmoid");
+  unary_op_gpu(inputs, out, "sigmoid");
 }
 
 void Sign::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "sign");
+  unary_op_gpu(inputs, out, "sign");
 }
 
 void Sin::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "sin");
+  unary_op_gpu(inputs, out, "sin");
 }
 
 void Sinh::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "sinh");
+  unary_op_gpu(inputs, out, "sinh");
 }
 
 void Split::eval_gpu(
@@ -902,14 +936,14 @@ void Split::eval_gpu(
 }
 
 void Square::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "square");
+  unary_op_gpu(inputs, out, "square");
 }
 
 void Sqrt::eval_gpu(const std::vector<array>& inputs, array& out) {
   if (recip_) {
-    unary_op(inputs, out, "rsqrt");
+    unary_op_gpu(inputs, out, "rsqrt");
   } else {
-    unary_op(inputs, out, "sqrt");
+    unary_op_gpu(inputs, out, "sqrt");
   }
 }
 
@@ -923,7 +957,8 @@ void Slice::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& in = inputs[0];
 
   // Calculate out strides, initial offset and if copy needs to be made
-  auto [copy_needed, data_offset, inp_strides] = prepare_slice(in);
+  auto [copy_needed, data_offset, inp_strides] =
+      prepare_slice(in, start_indices_, strides_);
 
   // Do copy if needed
   if (copy_needed) {
@@ -988,15 +1023,15 @@ void StopGradient::eval_gpu(const std::vector<array>& inputs, array& out) {
 }
 
 void Subtract::eval_gpu(const std::vector<array>& inputs, array& out) {
-  binary_op(inputs, out, "sub");
+  binary_op_gpu(inputs, out, "sub");
 }
 
 void Tan::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "tan");
+  unary_op_gpu(inputs, out, "tan");
 }
 
 void Tanh::eval_gpu(const std::vector<array>& inputs, array& out) {
-  unary_op(inputs, out, "tanh");
+  unary_op_gpu(inputs, out, "tanh");
 }
 
 void Transpose::eval_gpu(const std::vector<array>& inputs, array& out) {

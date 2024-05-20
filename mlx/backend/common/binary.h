@@ -5,6 +5,8 @@
 #include "mlx/array.h"
 #include "mlx/backend/common/utils.h"
 
+#include <iostream>
+
 namespace mlx::core {
 
 namespace {

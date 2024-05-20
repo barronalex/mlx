@@ -37,4 +37,21 @@ void copy_inplace(
     int64_t o_offset,
     CopyType ctype);
 
+std::tuple<bool, int64_t, std::vector<int64_t>> prepare_slice(
+    const array& in,
+    std::vector<int>& start_indices,
+    std::vector<int>& strides);
+
+void shared_buffer_slice(
+    const array& in,
+    const std::vector<size_t>& out_strides,
+    size_t data_offset,
+    array& out);
+
+void slice_op(
+    const array& in,
+    array& out,
+    std::vector<int>& start_indices,
+    std::vector<int>& strides);
+
 } // namespace mlx::core

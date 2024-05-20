@@ -40,7 +40,8 @@ def run_bench(system_size, fft_sizes, backend="mlx", dim=1):
         batch_size = system_size // n**dim
         shape = [batch_size] + [n for _ in range(dim)]
         if backend == "mlx":
-            x = mx.random.uniform(shape=shape).astype(mx.float32)
+            x_np = np.random.uniform(size=(system_size // n, n)).astype(np.complex64)
+            x = mx.array(x_np)
             x = x.astype(mx.complex64)
             mx.eval(x)
             fft = fft_mlx
@@ -61,25 +62,28 @@ def run_bench(system_size, fft_sizes, backend="mlx", dim=1):
 
 def time_fft():
     x = np.array(range(2, 512))
+    x = [i for i in x if all(p <= 13 for p in sympy.primefactors(i))]
+    # x = [2**k for k in range(13, 20)]
     system_size = int(2**26)
 
     print("MLX GPU")
     with mx.stream(mx.gpu):
         gpu_bandwidths = run_bench(system_size=system_size, fft_sizes=x)
 
-    np.save("gpu_bandwidths", gpu_bandwidths)
+    # np.save("gpu_bandwidths", gpu_bandwidths)
 
+    system_size = int(2**19)
     print("MPS GPU")
     mps_bandwidths = run_bench(system_size=system_size, fft_sizes=x, backend="mps")
 
-    np.save("mps_bandwidths", mps_bandwidths)
+    # np.save("mps_bandwidths", mps_bandwidths)
 
     print("CPU")
-    system_size = int(2**21)
+    system_size = int(2**19)
     with mx.stream(mx.cpu):
         cpu_bandwidths = run_bench(system_size=system_size, fft_sizes=x)
 
-    np.save("cpu_bandwidths", cpu_bandwidths)
+    # np.save("cpu_bandwidths", cpu_bandwidths)
 
     # cpu_bandwidths = np.load("cpu_bandwidths.npy")
     # gpu_bandwidths = np.load("gpu_bandwidths.npy")
@@ -97,14 +101,14 @@ def time_fft():
 
     for indices, name in [
         (all_indices, "All"),
-        (radix_2to13, "Radix 2-13"),
-        (bluesteins, "Bluestein's"),
+        # (radix_2to13, "Radix 2-13"),
+        # (bluesteins, "Bluestein's"),
     ]:
         # plot bandwidths
         print(name)
-        plt.scatter(x[indices], gpu_bandwidths[indices], color="green", label="GPU")
-        plt.scatter(x[indices], mps_bandwidths[indices], color="blue", label="MPS")
-        plt.scatter(x[indices], cpu_bandwidths[indices], color="red", label="CPU")
+        plt.scatter(x, gpu_bandwidths, color="green", label="GPU")
+        plt.scatter(x, mps_bandwidths, color="blue", label="MPS")
+        plt.scatter(x, cpu_bandwidths, color="red", label="CPU")
         plt.title(f"MLX FFT Benchmark -- {name}")
         plt.xlabel("N")
         plt.ylabel("Bandwidth (GB/s)")
