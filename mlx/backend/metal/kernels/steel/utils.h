@@ -43,3 +43,12 @@ METAL_FUNC ulong3 elem_to_loc_broadcast(
   }
   return ulong3(loc_a, loc_b, loc_c);
 }
+
+METAL_FUNC float2 complex_mul(float2 a, float2 b) {
+  return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+// Complex mul followed by conjugate
+METAL_FUNC float2 complex_mul_conj(float2 a, float2 b) {
+  return float2(a.x * b.x - a.y * b.y, -a.x * b.y - a.y * b.x);
+}

@@ -51,6 +51,9 @@ struct FFTPlan {
   int n2 = 0;
 
   int best_elems_per_thread() {
+    // Selecting the right number of elements for each thread
+    // to process is crucial for FFT performance where
+    // n decomposes into different radices.
     std::vector<int> steps;
     auto radices = supported_radices();
     steps.insert(steps.end(), stockham.begin(), stockham.end());
@@ -571,12 +574,11 @@ void fft_op(
       kname << "bluestein_fft_mem_" << threadgroup_mem_size;
     } else if (plan.rader_n > 1) {
       kname << "rader_fft_mem_" << threadgroup_mem_size;
-    } else if (in.dtype() == float32) {
-      kname << "rfft_mem_" << threadgroup_mem_size;
     } else if (four_step_params.required) {
       kname << "four_step_mem_" << threadgroup_mem_size;
     } else {
-      kname << "fft_mem_" << threadgroup_mem_size;
+      auto type = in.dtype() == float32 ? "float" : "float2";
+      kname << "fft_mem_" << threadgroup_mem_size << "_" << type;
     }
     std::string base_name = kname.str();
     // We use a specialized kernel for each FFT size

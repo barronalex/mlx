@@ -21,7 +21,6 @@ set(
   "binary_two"
   "conv"
   "copy"
-  "fft"
   "gemv"
   "quantized"
   "random"
