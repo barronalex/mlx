@@ -577,8 +577,10 @@ void fft_op(
     } else if (four_step_params.required) {
       kname << "four_step_mem_" << threadgroup_mem_size;
     } else {
-      auto type = in.dtype() == float32 ? "float" : "float2";
-      kname << "fft_mem_" << threadgroup_mem_size << "_" << type;
+      auto in_type = in.dtype() == float32 ? "float" : "float2";
+      auto out_type = out.dtype() == float32 ? "float" : "float2";
+      kname << "fft_mem_" << threadgroup_mem_size << "_" << in_type << "_"
+            << out_type;
     }
     std::string base_name = kname.str();
     // We use a specialized kernel for each FFT size

@@ -59,6 +59,7 @@ struct ReadWriter {
     int batch_idx = elem.x * grid.y * n;
     short tg_idx = elem.y * grid.z + elem.z;
 
+    // 2 complex64s = 128 bits
     constexpr int read_width = 2;
     for (short e = 0; e < (elems_per_thread / read_width); e++) {
       short index = read_width * tg_idx + read_width * threads_per_tg * e;
@@ -90,6 +91,23 @@ struct ReadWriter {
       out[batch_idx + index] = buf[index];
     }
   }
+
+  METAL_FUNC void load_strided(int stride) const {
+    // int coalesce_width = grid.y;
+    // int tg_idx = elem.y * grid.z + elem.z;
+    // int shared_idx = (tg_idx % coalesce_width) * n +
+    //     tg_idx / coalesce_width * elems_per_thread;
+    // int outer_batch_size = (stride / coalesce_width);
+    // int base_batch_idx = (elem.x % outer_batch_size) * coalesce_width +
+    //     overall_n * (elem.x / outer_batch_size);
+    // int device_idx = base_batch_idx +
+    //     tg_idx / coalesce_width * elems_per_thread * stride +
+    //     tg_idx % coalesce_width;
+
+    // for (int e = 0; e < elems_per_thread; e++) {
+    //   buf[shared_idx + e] = in[device_idx + e * stride];
+    // }
+  }
 };
 
 // For RFFT, we interleave batches of two real sequences into one complex one:
@@ -109,41 +127,20 @@ bool ReadWriter<float>::out_of_bounds() const {
 template <>
 void ReadWriter<float>::load() const {
   int batch_idx = elem.x * grid.y * n * 2;
-  short tg_idx = elem.y * grid.z + elem.z;
-
-  // Read 4 float32s sequentially per thread to reach 128 bits
-  constexpr int read_width = 4;
-  short num_elems = (elems_per_thread / (read_width / 2));
-  threadgroup float* float_buf = (threadgroup float*)buf;
-
-  for (short e = 0; e < num_elems; e++) {
-    short index = read_width * tg_idx + read_width * threads_per_tg * e;
-    STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < read_width; i++) {
-      // Pack two float32 seqs into one complex64 seq.
-      float_buf[index + i] = in[batch_idx + index + i];
-    }
-  }
-
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-
-  // Now that we have the data in threadgroup memory
-  // pack two real sequnces into one complex one:
-  // x x x x - - - - o o o o + + + +  ->
-  // x - x - x - x - o + o + o + o +
-  float2 temp[MAX_RADIX];
-  threadgroup float* float_seq_buf = float_buf + elem.y * n * 2;
-  for (short e = 0; e < elems_per_thread; e++) {
-    short index = elem.z + e * grid.z;
-    temp[e] = float2(float_seq_buf[index], float_seq_buf[index + n]);
-  }
-
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-
   threadgroup float2* seq_buf = buf + elem.y * n;
-  for (short e = 0; e < elems_per_thread; e++) {
-    short index = elem.z + e * grid.z;
-    seq_buf[index] = temp[e];
+
+  // No out of bounds accesses on odd batch sizes
+  int grid_index = elem.x * grid.y + elem.y;
+  short next_in =
+      batch_size % 2 == 1 && grid_index * 2 == batch_size - 1 ? 0 : n;
+
+  short m = grid.z;
+  short fft_idx = elem.z;
+
+  for (int e = 0; e < elems_per_thread; e++) {
+    int index = metal::min(fft_idx + e * m, n - 1);
+    seq_buf[index].x = in[batch_idx + index];
+    seq_buf[index].y = in[batch_idx + index + next_in];
   }
 }
 
@@ -151,16 +148,16 @@ template <>
 void ReadWriter<float>::write() const {
   short n_over_2 = (n / 2) + 1;
 
-  int batch_idx_out = elem.x * grid.y * n_over_2 * 2;
-
+  int batch_idx = elem.x * grid.y * n_over_2 * 2;
   threadgroup float2* seq_buf = buf + elem.y * n;
 
-  batch_idx_out += elem.y * n_over_2 * 2;
+  int grid_index = elem.x * grid.y + elem.y;
+  short next_out =
+      batch_size % 2 == 1 && grid_index * 2 == batch_size - 1 ? 0 : n_over_2;
 
   float2 conj = {1, -1};
   float2 minus_j = {0, -1};
 
-  short next_out = n_over_2;
   short m = grid.z;
   short fft_idx = elem.z;
 
@@ -169,13 +166,13 @@ void ReadWriter<float>::write() const {
     // x_0 = z_0.real
     // y_0 = z_0.imag
     if (index == 0) {
-      out[batch_idx_out + index] = {seq_buf[index].x, 0};
-      out[batch_idx_out + index + next_out] = {seq_buf[index].y, 0};
+      out[batch_idx + index] = {seq_buf[index].x, 0};
+      out[batch_idx + index + next_out] = {seq_buf[index].y, 0};
     } else {
       float2 x_k = seq_buf[index];
       float2 x_n_minus_k = seq_buf[n - index] * conj;
-      out[batch_idx_out + index] = (x_k + x_n_minus_k) / 2;
-      out[batch_idx_out + index + next_out] =
+      out[batch_idx + index] = (x_k + x_n_minus_k) / 2;
+      out[batch_idx + index + next_out] =
           complex_mul(((x_k - x_n_minus_k) / 2), minus_j);
     }
   }
@@ -185,8 +182,8 @@ void ReadWriter<float>::write() const {
     int index = metal::min(fft_idx + elems_per_thread / 2 * m, n_over_2 - 1);
     float2 x_k = seq_buf[index];
     float2 x_n_minus_k = seq_buf[n - index] * conj;
-    out[batch_idx_out + index] = (x_k + x_n_minus_k) / 2;
-    out[batch_idx_out + index + next_out] =
+    out[batch_idx + index] = (x_k + x_n_minus_k) / 2;
+    out[batch_idx + index + next_out] =
         complex_mul(((x_k - x_n_minus_k) / 2), minus_j);
   }
 }

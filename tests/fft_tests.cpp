@@ -10,7 +10,7 @@ using namespace mlx::core;
 
 TEST_CASE("test fft basics") {
   random::seed(7);
-  int n = 2048;
+  int n = 256;
 
   // int n = 13;
   int batch_size = 131072 * 1024 / n * 2;

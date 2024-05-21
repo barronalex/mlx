@@ -205,10 +205,10 @@ rader_fft(int fft_idx, thread int* p, int m, int n, threadgroup float2* buf) {
 //
 // N is decomposed into radix-n DFTs:
 // e.g. 128 = 2 * 4 * 4 * 4
-template <int tg_mem_size, typename in_T>
+template <int tg_mem_size, typename in_T, typename out_T>
 [[kernel]] void fft(
     const device in_T* in [[buffer(0)]],
-    device float2* out [[buffer(1)]],
+    device out_T* out [[buffer(1)]],
     constant const int& n,
     constant const int& batch_size,
     uint3 elem [[thread_position_in_grid]],
@@ -473,87 +473,6 @@ template <int tg_mem_size>
 }
 
 template <int tg_mem_size>
-[[kernel]] void rfft(
-    const device float* in [[buffer(0)]],
-    device float2* out [[buffer(1)]],
-    constant const int& n,
-    constant const int& batch_size,
-    uint3 elem [[thread_position_in_grid]],
-    uint3 grid [[threads_per_grid]]) {
-  // For RFFT, we interleave batches of two real sequences into one complex one:
-  //
-  // z_k = x_k + j.y_k
-  // X_k = (Z_k + Z_(N-k)*) / 2
-  // Y_k = -j * ((Z_k - Z_(N-k)*) / 2)
-  //
-  // This roughly doubles the throughput over the regular FFT.
-  int n_over_2 = (n / 2) + 1;
-
-  int fft_idx = elem.z;
-  int tg_idx = elem.y * n;
-  int batch_idx = elem.x * grid.y * 2 * n + elem.y * 2 * n;
-  int batch_idx_out = elem.x * grid.y * 2 * n_over_2 + elem.y * 2 * n_over_2;
-
-  int m = grid.z;
-
-  // Account for possible extra threadgroups
-  int grid_index = elem.x * grid.y + elem.y;
-  if (grid_index * 2 >= batch_size) {
-    return;
-  }
-
-  int next_in = n;
-  int next_out = n_over_2;
-  // No out of bounds accesses on odd batch sizes
-  if (batch_size % 2 == 1 && grid_index * 2 == batch_size - 1) {
-    next_in = 0;
-    next_out = 0;
-  }
-
-  threadgroup float2 shared_in[tg_mem_size];
-  threadgroup float2* buf = &shared_in[tg_idx];
-
-  for (int t = 0; t < elems_per_thread_; t++) {
-    int index = metal::min(fft_idx + t * m, n - 1);
-    buf[index].x = in[batch_idx + index];
-    buf[index].y = in[batch_idx + index + next_in];
-  }
-
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-
-  int p = 1;
-  radix_fft(fft_idx, &p, m, n, buf);
-
-  float2 conj = {1, -1};
-  float2 minus_j = {0, -1};
-  for (int t = 0; t < elems_per_thread_ / 2; t++) {
-    int index = metal::min(fft_idx + t * m, n_over_2 - 1);
-    // x_0 = z_0.real
-    // y_0 = z_0.imag
-    if (index == 0) {
-      out[batch_idx_out + index] = {buf[index].x, 0};
-      out[batch_idx_out + index + next_out] = {buf[index].y, 0};
-    } else {
-      float2 x_k = buf[index];
-      float2 x_n_minus_k = buf[n - index] * conj;
-      out[batch_idx_out + index] = (x_k + x_n_minus_k) / 2;
-      out[batch_idx_out + index + next_out] =
-          complex_mul(((x_k - x_n_minus_k) / 2), minus_j);
-    }
-  }
-  // Add in elements up to n/2 + 1
-  int num_left = n_over_2 - (elems_per_thread_ / 2 * m);
-  if (fft_idx < num_left) {
-    int index = metal::min(fft_idx + elems_per_thread_ / 2 * m, n_over_2 - 1);
-    float2 x_k = buf[index];
-    float2 x_n_minus_k = buf[n - index] * conj;
-    out[batch_idx_out + index] = (x_k + x_n_minus_k) / 2;
-    out[batch_idx_out + index + next_out] =
-        complex_mul(((x_k - x_n_minus_k) / 2), minus_j);
-  }
-}
-
-template <int tg_mem_size>
 [[kernel]] void four_step_fft(
     const device float2* in [[buffer(0)]],
     device float2* out [[buffer(1)]],
@@ -642,14 +561,15 @@ template <int tg_mem_size>
   }
 }
 
-#define instantiate_fft(tg_mem_size, in_T)                                  \
-  template [[host_name("fft_mem_" #tg_mem_size "_" #in_T)]] [[kernel]] void \
-  fft<tg_mem_size, in_T>(                                                   \
-      const device in_T* in [[buffer(0)]],                                  \
-      device float2* out [[buffer(1)]],                                     \
-      constant const int& n,                                                \
-      constant const int& batch_size,                                       \
-      uint3 elem [[thread_position_in_grid]],                               \
+#define instantiate_fft(tg_mem_size, in_T, out_T)        \
+  template [[host_name("fft_mem_" #tg_mem_size "_" #in_T \
+                       "_" #out_T)]] [[kernel]] void     \
+  fft<tg_mem_size, in_T, out_T>(                         \
+      const device in_T* in [[buffer(0)]],               \
+      device out_T* out [[buffer(1)]],                   \
+      constant const int& n,                             \
+      constant const int& batch_size,                    \
+      uint3 elem [[thread_position_in_grid]],            \
       uint3 grid [[threads_per_grid]]);
 
 #define instantiate_rader(tg_mem_size)                                  \
@@ -703,8 +623,8 @@ template <int tg_mem_size>
 
 // clang-format off
 #define instantiate_ffts(tg_mem_size)                        \
-  instantiate_fft(tg_mem_size, float2) \
-  instantiate_fft(tg_mem_size, float) \
+  instantiate_fft(tg_mem_size, float2, float2) \
+  instantiate_fft(tg_mem_size, float, float2) \
   instantiate_rader(tg_mem_size) \
   instantiate_bluestein(tg_mem_size) \
   instantiate_four_step(tg_mem_size)

@@ -64,8 +64,9 @@ def run_bench(system_size, fft_sizes, backend="mlx", dim=1):
 def time_fft():
     x = np.array(range(2, 512))
     # x = [i for i in x if all(p <= 13 for p in sympy.primefactors(i))]
-    x = [2**k for k in range(1, 13)]
-    system_size = int(2**27)
+    # x = [2**k for k in range(1, 13)]
+    x = [17, 47]
+    system_size = int(2**26)
 
     print("MLX GPU")
     with mx.stream(mx.gpu):
