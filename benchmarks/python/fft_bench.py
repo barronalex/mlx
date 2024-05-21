@@ -21,7 +21,7 @@ def bandwidth_gb(runtime_ms, system_size):
 def run_bench(system_size, fft_sizes, backend="mlx", dim=1):
     def fft_mlx(x):
         if dim == 1:
-            out = mx.fft.fft(x)
+            out = mx.fft.rfft(x)
         elif dim == 2:
             out = mx.fft.fft2(x)
         mx.eval(out)
@@ -29,7 +29,7 @@ def run_bench(system_size, fft_sizes, backend="mlx", dim=1):
 
     def fft_mps(x):
         if dim == 1:
-            out = torch.fft.fft(x)
+            out = torch.fft.rfft(x)
         elif dim == 2:
             out = torch.fft.fft2(x)
         torch.mps.synchronize()
@@ -40,13 +40,14 @@ def run_bench(system_size, fft_sizes, backend="mlx", dim=1):
         batch_size = system_size // n**dim
         shape = [batch_size] + [n for _ in range(dim)]
         if backend == "mlx":
-            x_np = np.random.uniform(size=(system_size // n, n)).astype(np.complex64)
+            # x_np = np.random.uniform(size=(system_size // n, n)).astype(np.complex64)
+            x_np = np.random.uniform(size=(system_size // n, n)).astype(np.float32)
             x = mx.array(x_np)
-            x = x.astype(mx.complex64)
             mx.eval(x)
             fft = fft_mlx
         elif backend == "mps":
-            x_np = np.random.uniform(size=(system_size // n, n)).astype(np.complex64)
+            # x_np = np.random.uniform(size=(system_size // n, n)).astype(np.complex64)
+            x_np = np.random.uniform(size=(system_size // n, n)).astype(np.float32)
             x = torch.tensor(x_np, device="mps")
             torch.mps.synchronize()
             fft = fft_mps
@@ -62,9 +63,9 @@ def run_bench(system_size, fft_sizes, backend="mlx", dim=1):
 
 def time_fft():
     x = np.array(range(2, 512))
-    x = [i for i in x if all(p <= 13 for p in sympy.primefactors(i))]
-    # x = [2**k for k in range(13, 20)]
-    system_size = int(2**26)
+    # x = [i for i in x if all(p <= 13 for p in sympy.primefactors(i))]
+    x = [2**k for k in range(1, 13)]
+    system_size = int(2**27)
 
     print("MLX GPU")
     with mx.stream(mx.gpu):
@@ -72,7 +73,6 @@ def time_fft():
 
     # np.save("gpu_bandwidths", gpu_bandwidths)
 
-    system_size = int(2**19)
     print("MPS GPU")
     mps_bandwidths = run_bench(system_size=system_size, fft_sizes=x, backend="mps")
 

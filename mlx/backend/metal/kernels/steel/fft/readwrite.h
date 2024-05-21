@@ -149,60 +149,46 @@ void ReadWriter<float>::load() const {
 
 template <>
 void ReadWriter<float>::write() const {
-  int n_over_2 = (n / 2) + 1;
+  short n_over_2 = (n / 2) + 1;
+
   int batch_idx_out = elem.x * grid.y * n_over_2 * 2;
-  short tg_idx = elem.y * grid.z + elem.z;
 
-  auto conj = float2(1, -1);
-  auto minus_j = float2(0, -1);
-
-  constexpr int read_width = 2;
-  short num_elems = elems_per_thread / 2;
-
-  float2 temp[MAX_RADIX + 2];
   threadgroup float2* seq_buf = buf + elem.y * n;
 
-  for (short e = 0; e < num_elems; e++) {
-    short index = elem.z + e * grid.z;
+  batch_idx_out += elem.y * n_over_2 * 2;
+
+  float2 conj = {1, -1};
+  float2 minus_j = {0, -1};
+
+  short next_out = n_over_2;
+  short m = grid.z;
+  short fft_idx = elem.z;
+
+  for (int t = 0; t < elems_per_thread / 2; t++) {
+    int index = metal::min(fft_idx + t * m, n_over_2 - 1);
+    // x_0 = z_0.real
+    // y_0 = z_0.imag
     if (index == 0) {
-      temp[2 * e] = float2(seq_buf[index].x, 0);
-      temp[2 * e + 1] = float2(seq_buf[index].y, 0);
+      out[batch_idx_out + index] = {seq_buf[index].x, 0};
+      out[batch_idx_out + index + next_out] = {seq_buf[index].y, 0};
     } else {
       float2 x_k = seq_buf[index];
       float2 x_n_minus_k = seq_buf[n - index] * conj;
-      temp[2 * e] = (x_k + x_n_minus_k) / 2;
-      temp[2 * e + 1] = complex_mul(((x_k - x_n_minus_k) / 2), minus_j);
+      out[batch_idx_out + index] = (x_k + x_n_minus_k) / 2;
+      out[batch_idx_out + index + next_out] =
+          complex_mul(((x_k - x_n_minus_k) / 2), minus_j);
     }
   }
-
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-
-  for (short e = 0; e < num_elems; e++) {
-    short index = elem.z + e * grid.z;
-    seq_buf[index] = temp[2 * e];
-    seq_buf[index + n_over_2] = temp[2 * e + 1];
+  // Add in elements up to n/2 + 1
+  int num_left = n_over_2 - (elems_per_thread / 2 * m);
+  if (fft_idx < num_left) {
+    int index = metal::min(fft_idx + elems_per_thread / 2 * m, n_over_2 - 1);
+    float2 x_k = seq_buf[index];
+    float2 x_n_minus_k = seq_buf[n - index] * conj;
+    out[batch_idx_out + index] = (x_k + x_n_minus_k) / 2;
+    out[batch_idx_out + index + next_out] =
+        complex_mul(((x_k - x_n_minus_k) / 2), minus_j);
   }
-
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-
-  for (short e = 0; e < num_elems; e++) {
-    short index = read_width * tg_idx + read_width * threads_per_tg * e;
-    STEEL_PRAGMA_UNROLL
-    for (short i = 0; i < read_width; i++) {
-      // vectorized writes
-      out[batch_idx_out + index + i] = buf[index + i];
-    }
-  }
-
-  // We've written (n / 2) elements but we need to write (n / 2) + 1
-  // size_t num_left = n_over_2 - (num_elems * grid.z);
-  if (elem.z == 0) {
-    out[batch_idx_out + 2 * (elem.y + 1) * n_over_2 - 1] = 8;
-    out[batch_idx_out + 2 * (elem.y + 1) * n_over_2 - 2] = 8;
-  }
-  // if (elem.z == grid.z - 1) {
-  //   out[batch_idx_out + 2*(elem.y + 1)*n_over_2 - 2] = temp[2*num_elems - 1];
-  // }
 }
 
 // Strided loading
