@@ -64,7 +64,7 @@ typedef void (*RadixFunc)(thread float2*, thread float2*);
 
 // Perform a single radix n butterfly with appropriate twiddles
 template <int radix, RadixFunc radix_func>
-METAL_FUNC void radix_n(
+METAL_FUNC void radix_butterfly(
     int i,
     int p,
     thread float2* x,
@@ -86,7 +86,7 @@ METAL_FUNC void radix_n(
     j = (i / p) * radix * p + k;
   }
 
-  // Apply twiddles based on where in the decomposition we are
+  // Apply twiddles
   if (p > 1) {
     float2 twiddle_1 = get_twiddle(k, radix * p);
     float2 twiddle = twiddle_1;
@@ -139,7 +139,7 @@ METAL_FUNC void radix_n_steps(
         for (int r = 0; r < radix; r++) {
           inputs[r] = buf[index + r * m_r];
         }
-        radix_n<radix, radix_func>(
+        radix_butterfly<radix, radix_func>(
             index, *p, inputs, indices + t * radix, values + t * radix);
       }
     }

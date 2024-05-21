@@ -557,6 +557,8 @@ void fft_op(
   if (real && !inverse) {
     // We can perform 2 RFFTs at once so the batch size is halved.
     batch_size = (batch_size + 2 - 1) / 2;
+    // One extra FFT thread for the (+1) in (n/2 + 1)
+    // threads_per_fft += 1;
   }
   int out_buffer_size = out.size();
 

@@ -16,7 +16,7 @@ TEST_CASE("test fft basics") {
   int batch_size = 131072 * 1024 / n * 2;
   // int batch_size = 256;
   // int batch_size = 8192*32;
-  // int batch_size = 4;
+  // int batch_size = 256;
   // array x = arange(n);
   // x = tile(reshape(x, {1, n}), {batch_size, 1});
   array x = random::normal({batch_size, n});
