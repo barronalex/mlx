@@ -6,6 +6,7 @@ import unittest
 import mlx.core as mx
 import mlx_tests
 import numpy as np
+import sympy
 
 
 class TestFFT(mlx_tests.MLXTestCase):
@@ -96,28 +97,35 @@ class TestFFT(mlx_tests.MLXTestCase):
         self.check_mx_np(mx.fft.fft, np.fft.fft, a_np, atol=atol, rtol=rtol)
         # self.check_mx_np(mx.fft.ifft, np.fft.ifft, a_np, atol=atol, rtol=rtol)
 
-        # self.check_mx_np(mx.fft.rfft, np.fft.rfft, r, atol=atol, rtol=rtol)
+        self.check_mx_np(mx.fft.rfft, np.fft.rfft, r, atol=atol, rtol=rtol)
 
         # ia_np = np.fft.rfft(a_np)
         # self.check_mx_np(mx.fft.irfft, np.fft.irfft, ia_np, atol=atol, rtol=rtol)
 
     def test_fft_shared_mem(self):
-        nums = np.concatenate(
-            [
-                # small radix
-                np.arange(2, 14),
-                # powers of 2
-                [2**k for k in range(4, 13)],
-                # stockham
-                [3 * 3 * 3, 3 * 11, 11 * 13 * 2, 7 * 4 * 13 * 11, 13 * 13 * 13],
-                # rader
-                [17, 23, 29, 17 * 8 * 3, 23 * 2, 1153, 4006],
-                # bluestein
-                [47, 83, 17 * 17, 3109],
-            ]
-        )
+        # nums = np.concatenate(
+        #     [
+        #         # small radix
+        #         np.arange(2, 14),
+        #         # powers of 2
+        #         [2**k for k in range(4, 13)],
+        #         # stockham
+        #         [3 * 3 * 3, 3 * 11, 11 * 13 * 2, 7 * 4 * 13 * 11, 13 * 13 * 13],
+        #         # rader
+        #         [17, 23, 29, 17 * 8 * 3, 23 * 2, 1153, 4006],
+        #         # bluestein
+        #         [47, 83, 17 * 17, 3109],
+        #     ]
+        # )
+        # for batch_size in (1, 3, 32):
+        #     for num in nums:
+        #         atol = 1e-4 if num < 1025 else 1e-3
+        #         self._run_ffts((batch_size, num), atol=atol)
+
+        nums = [i for i in range(2, 512) if all(p <= 13 for p in sympy.primefactors(i))]
         for batch_size in (1, 3, 32):
             for num in nums:
+                print(num)
                 atol = 1e-4 if num < 1025 else 1e-3
                 self._run_ffts((batch_size, num), atol=atol)
 

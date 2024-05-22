@@ -14,11 +14,11 @@ coalesced with accesses from adajcent threads for optimal performance.
 
 using namespace metal;
 
-template <typename T>
+template <typename in_T, typename out_T>
 struct ReadWriter {
-  const device T* in;
+  const device in_T* in;
   threadgroup float2* buf;
-  device float2* out;
+  device out_T* out;
   int n;
   int batch_size;
   int elems_per_thread;
@@ -27,9 +27,9 @@ struct ReadWriter {
   int threads_per_tg;
 
   METAL_FUNC ReadWriter(
-      const device T* in_,
+      const device in_T* in_,
       threadgroup float2* buf_,
-      device float2* out_,
+      device out_T* out_,
       const short n_,
       const int batch_size_,
       const short elems_per_thread_,
@@ -45,7 +45,7 @@ struct ReadWriter {
         grid(grid_) {
     // Account for padding on last threadgroup
     threads_per_tg = elem.x == grid.x - 1
-        ? ((batch_size / 2) - (grid.x - 1) * grid.y) * grid.z
+        ? (batch_size - (grid.x - 1) * grid.y) * grid.z
         : grid.y * grid.z;
   }
 
@@ -91,23 +91,6 @@ struct ReadWriter {
       out[batch_idx + index] = buf[index];
     }
   }
-
-  METAL_FUNC void load_strided(int stride) const {
-    // int coalesce_width = grid.y;
-    // int tg_idx = elem.y * grid.z + elem.z;
-    // int shared_idx = (tg_idx % coalesce_width) * n +
-    //     tg_idx / coalesce_width * elems_per_thread;
-    // int outer_batch_size = (stride / coalesce_width);
-    // int base_batch_idx = (elem.x % outer_batch_size) * coalesce_width +
-    //     overall_n * (elem.x / outer_batch_size);
-    // int device_idx = base_batch_idx +
-    //     tg_idx / coalesce_width * elems_per_thread * stride +
-    //     tg_idx % coalesce_width;
-
-    // for (int e = 0; e < elems_per_thread; e++) {
-    //   buf[shared_idx + e] = in[device_idx + e * stride];
-    // }
-  }
 };
 
 // For RFFT, we interleave batches of two real sequences into one complex one:
@@ -118,15 +101,15 @@ struct ReadWriter {
 //
 // This roughly doubles the throughput over the regular FFT.
 template <>
-bool ReadWriter<float>::out_of_bounds() const {
+bool ReadWriter<float, float2>::out_of_bounds() const {
   int grid_index = elem.x * grid.y + elem.y;
   // We pack two sequences into one for RFFTs
   return grid_index * 2 >= batch_size;
 }
 
 template <>
-void ReadWriter<float>::load() const {
-  int batch_idx = elem.x * grid.y * n * 2;
+void ReadWriter<float, float2>::load() const {
+  int batch_idx = elem.x * grid.y * n * 2 + elem.y * n * 2;
   threadgroup float2* seq_buf = buf + elem.y * n;
 
   // No out of bounds accesses on odd batch sizes
@@ -145,10 +128,10 @@ void ReadWriter<float>::load() const {
 }
 
 template <>
-void ReadWriter<float>::write() const {
+void ReadWriter<float, float2>::write() const {
   short n_over_2 = (n / 2) + 1;
 
-  int batch_idx = elem.x * grid.y * n_over_2 * 2;
+  int batch_idx = elem.x * grid.y * n_over_2 * 2 + elem.y * n_over_2 * 2;
   threadgroup float2* seq_buf = buf + elem.y * n;
 
   int grid_index = elem.x * grid.y + elem.y;
@@ -185,6 +168,81 @@ void ReadWriter<float>::write() const {
     out[batch_idx + index] = (x_k + x_n_minus_k) / 2;
     out[batch_idx + index + next_out] =
         complex_mul(((x_k - x_n_minus_k) / 2), minus_j);
+  }
+}
+
+// For IRFFT, we do the opposite
+//
+// Z_k = X_k + j.Y_k
+// x_k = Re(Z_k)
+// Y_k = Imag(Z_k)
+template <>
+bool ReadWriter<float2, float>::out_of_bounds() const {
+  int grid_index = elem.x * grid.y + elem.y;
+  // We pack two sequences into one for IRFFTs
+  return grid_index * 2 >= batch_size;
+}
+
+template <>
+void ReadWriter<float2, float>::load() const {
+  short n_over_2 = (n / 2) + 1;
+  int batch_idx = elem.x * grid.y * n_over_2 * 2 + elem.y * n_over_2 * 2;
+  threadgroup float2* seq_buf = buf + elem.y * n;
+
+  // No out of bounds accesses on odd batch sizes
+  int grid_index = elem.x * grid.y + elem.y;
+  short next_in =
+      batch_size % 2 == 1 && grid_index * 2 == batch_size - 1 ? 0 : n_over_2;
+
+  short m = grid.z;
+  short fft_idx = elem.z;
+
+  float2 conj = {1, -1};
+  float2 plus_j = {0, 1};
+
+  for (int t = 0; t < elems_per_thread / 2; t++) {
+    int index = fft_idx + t * m;
+    float2 x = in[batch_idx + index];
+    float2 y = in[batch_idx + index + next_in];
+    seq_buf[index] = x;
+    seq_buf[index] = x + complex_mul(y, plus_j);
+    // conjugate for ifft
+    seq_buf[index].y = -seq_buf[index].y;
+    if (index > 0) {
+      seq_buf[n - index] = (x * conj) + complex_mul(y * conj, plus_j);
+      seq_buf[n - index].y = -seq_buf[n - index].y;
+    }
+  }
+
+  int num_left = n - ((elems_per_thread / 2) * 2 * m) + 1;
+  if (fft_idx < num_left) {
+    int index = fft_idx + elems_per_thread / 2 * m;
+    float2 x = in[batch_idx + index];
+    float2 y = in[batch_idx + index + next_in];
+    // conjugate for ifft
+    seq_buf[index] = x + complex_mul(y, plus_j);
+    seq_buf[index].y = -seq_buf[index].y;
+    seq_buf[n - index] = (x * conj) + complex_mul(y * conj, plus_j);
+    seq_buf[n - index].y = -seq_buf[n - index].y;
+  }
+}
+
+template <>
+void ReadWriter<float2, float>::write() const {
+  int batch_idx = elem.x * grid.y * n * 2 + elem.y * n * 2;
+  threadgroup float2* seq_buf = buf + elem.y * n;
+
+  int grid_index = elem.x * grid.y + elem.y;
+  short next_out =
+      batch_size % 2 == 1 && grid_index * 2 == batch_size - 1 ? 0 : n;
+
+  short m = grid.z;
+  short fft_idx = elem.z;
+
+  for (int e = 0; e < elems_per_thread; e++) {
+    int index = fft_idx + e * m;
+    out[batch_idx + index] = seq_buf[index].x / n;
+    out[batch_idx + index + next_out] = seq_buf[index].y / -n;
   }
 }
 

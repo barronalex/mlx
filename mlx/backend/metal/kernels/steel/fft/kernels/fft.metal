@@ -215,7 +215,7 @@ template <int tg_mem_size, typename in_T, typename out_T>
     uint3 grid [[threads_per_grid]]) {
   threadgroup float2 shared_in[tg_mem_size];
 
-  thread ReadWriter<in_T> read_writer = ReadWriter<in_T>(
+  thread ReadWriter<in_T, out_T> read_writer = ReadWriter<in_T, out_T>(
       in, &shared_in[0], out, n, batch_size, elems_per_thread_, elem, grid);
 
   if (read_writer.out_of_bounds()) {
@@ -231,7 +231,6 @@ template <int tg_mem_size, typename in_T, typename out_T>
   int tg_idx = elem.y * n; // Index of this DFT in threadgroup
   threadgroup float2* buf = &shared_in[tg_idx];
 
-  // Do the FFT
   radix_fft(i, &p, m, n, buf);
 
   read_writer.write();
@@ -599,16 +598,6 @@ template <int tg_mem_size>
       uint3 elem [[thread_position_in_grid]],                               \
       uint3 grid [[threads_per_grid]]);
 
-#define instantiate_rfft(tg_mem_size)                              \
-  template [[host_name("rfft_mem_" #tg_mem_size)]] [[kernel]] void \
-  rfft<tg_mem_size>(                                               \
-      const device float* in [[buffer(0)]],                        \
-      device float2* out [[buffer(1)]],                            \
-      constant const int& n,                                       \
-      constant const int& batch_size,                              \
-      uint3 elem [[thread_position_in_grid]],                      \
-      uint3 grid [[threads_per_grid]]);
-
 #define instantiate_four_step(tg_mem_size)                              \
   template [[host_name("four_step_mem_" #tg_mem_size)]] [[kernel]] void \
   four_step_fft<tg_mem_size>(                                           \
@@ -625,6 +614,7 @@ template <int tg_mem_size>
 #define instantiate_ffts(tg_mem_size)                        \
   instantiate_fft(tg_mem_size, float2, float2) \
   instantiate_fft(tg_mem_size, float, float2) \
+  instantiate_fft(tg_mem_size, float2, float) \
   instantiate_rader(tg_mem_size) \
   instantiate_bluestein(tg_mem_size) \
   instantiate_four_step(tg_mem_size)

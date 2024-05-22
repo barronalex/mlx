@@ -52,8 +52,8 @@ struct FFTPlan {
 
   int best_elems_per_thread() {
     // Selecting the right number of elements for each thread
-    // to process is crucial for FFT performance where
-    // n decomposes into different radices.
+    // to process is crucial for FFT performance when there
+    // are mixed radices.
     std::vector<int> steps;
     auto radices = supported_radices();
     steps.insert(steps.end(), stockham.begin(), stockham.end());
@@ -537,7 +537,8 @@ void fft_op(
   func_consts.push_back(make_int(&rader_m, 3));
 
   // The overall number of FFTs we're going to compute for this input
-  int total_batch_size = in.size() / n;
+  int total_batch_size =
+      out.dtype() == float32 ? out.size() / n : in.size() / n;
   int threads_per_fft = (fft_size + elems_per_thread - 1) / elems_per_thread;
 
   // We batch among threadgroups for improved efficiency when n is small
@@ -554,7 +555,8 @@ void fft_op(
   int batch_size =
       (total_batch_size + threadgroup_batch_size - 1) / threadgroup_batch_size;
 
-  if (real && !inverse) {
+  std::cout << "real " << real << std::endl;
+  if (real) {
     // We can perform 2 RFFTs at once so the batch size is halved.
     batch_size = (batch_size + 2 - 1) / 2;
   }
@@ -565,6 +567,8 @@ void fft_op(
   // std::cout << "threadgroup_batch_size " << threadgroup_batch_size <<
   // std::endl; std::cout << "threads per fft " << threads_per_fft << std::endl;
   // std::cout << "total_batch_size " << total_batch_size << std::endl;
+
+  // std::cout << "n " << n << std::endl;
 
   auto& compute_encoder = d.get_command_encoder(s.index);
   {
@@ -583,6 +587,7 @@ void fft_op(
             << out_type;
     }
     std::string base_name = kname.str();
+    std::cout << "base name " << base_name << std::endl;
     // We use a specialized kernel for each FFT size
     kname << "_n" << fft_size << "_inv_" << inverse;
     std::string hash_name = kname.str();
