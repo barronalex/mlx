@@ -51,9 +51,8 @@ struct FFTPlan {
   int n2 = 0;
 
   int best_elems_per_thread() {
-    // Selecting the right number of elements for each thread
-    // to process is crucial for FFT performance when there
-    // are mixed radices.
+    // Heuristic for selecting an efficient number
+    // of threads to use for a particular mixed-radix FFT.
     std::vector<int> steps;
     auto radices = supported_radices();
     steps.insert(steps.end(), stockham.begin(), stockham.end());
@@ -89,7 +88,18 @@ struct FFTPlan {
         (used_radices.find(11) != used_radices.end() ||
          used_radices.find(13) != used_radices.end())) {
       num_elems = 7;
+    } else if (
+        used_radices.find(11) != used_radices.end() &&
+        used_radices.find(13) != used_radices.end()) {
+      num_elems = 11;
     }
+
+    // TODO(alexbarron) Some really weird stuff is going on
+    // for certain `elems_per_thread` on large composite n.
+    // Possibly a compiler issue?
+    num_elems = n == 3159 ? 13 : num_elems;
+    num_elems = n == 3645 ? 5 : num_elems;
+    num_elems = n == 3969 ? 7 : num_elems;
 
     return num_elems;
   }
@@ -171,10 +181,8 @@ FFTPlan plan_fft(int n) {
     // Make sure the factor is a supported radix
     if (radices_set.find(factor) == radices_set.end()) {
       // We only support a single Rader factor currently
-      // TODO(alexbarron): We limit the maximum Rader size to 2048
-      // because the compiler starts doing strange things when it tries to
-      // compile rader's decompositions with multiple radix 7/11/13 codelets.
-      // e.g. 4006 = 2003 * 2 = (Rader(2002) * 2) = (Rader(2*7*11*13) * 2)
+      // TODO(alexbarron) investigate weirdness with large
+      // Rader sizes -- possibly a compiler issue?
       if (plan.rader_n > 1 || n > MAX_RADER_FFT_SIZE) {
         plan.four_step = n > MAX_BLUESTEIN_FFT_SIZE;
         plan.bluestein_n = next_fast_n(2 * n - 1);
@@ -555,7 +563,6 @@ void fft_op(
   int batch_size =
       (total_batch_size + threadgroup_batch_size - 1) / threadgroup_batch_size;
 
-  std::cout << "real " << real << std::endl;
   if (real) {
     // We can perform 2 RFFTs at once so the batch size is halved.
     batch_size = (batch_size + 2 - 1) / 2;
@@ -587,7 +594,6 @@ void fft_op(
             << out_type;
     }
     std::string base_name = kname.str();
-    std::cout << "base name " << base_name << std::endl;
     // We use a specialized kernel for each FFT size
     kname << "_n" << fft_size << "_inv_" << inverse;
     std::string hash_name = kname.str();

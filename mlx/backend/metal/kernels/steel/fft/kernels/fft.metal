@@ -23,7 +23,7 @@ using namespace metal;
 #define MAX_RADIX 13
 // Reached when elems_per_thread_ = 8, max_radix = 11/13
 // and some threads have to do 2 radix 8s requiring 16 float2s.
-#define MAX_OUTPUT_SIZE 16
+#define MAX_OUTPUT_SIZE 18
 
 // Specialize for a particular value of N at runtime
 STEEL_CONST bool inv_ [[function_constant(0)]];
@@ -226,12 +226,12 @@ template <int tg_mem_size, typename in_T, typename out_T>
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   int p = 1;
-  int i = elem.z; // Thread index in DFT
+  int fft_idx = elem.z; // Thread index in DFT
   int m = grid.z; // Threads per DFT
   int tg_idx = elem.y * n; // Index of this DFT in threadgroup
   threadgroup float2* buf = &shared_in[tg_idx];
 
-  radix_fft(i, &p, m, n, buf);
+  radix_fft(fft_idx, &p, m, n, buf);
 
   read_writer.write();
 }
@@ -409,38 +409,24 @@ template <int tg_mem_size>
   // Where w_k and w_q are precomputed on CPU in high precision as:
   //   w_k = np.exp(-1j * np.pi / n * (np.arange(-n + 1, n) ** 2))
   //   w_q = np.fft.fft(1/w_k[-n:])
-  int fft_idx = elem.z;
-  int tg_idx = elem.y * n;
-  int batch_idx = elem.x * grid.y * length + elem.y * length;
-
-  int m = grid.z;
-
   threadgroup float2 shared_in[tg_mem_size];
-  threadgroup float2* buf = &shared_in[tg_idx];
 
-  // Account for possible extra threadgroups
-  int grid_index = elem.x * grid.y + elem.y;
-  if (grid_index >= batch_size) {
+  thread ReadWriter<float2, float2> read_writer = ReadWriter<float2, float2>(
+      in, &shared_in[0], out, n, batch_size, elems_per_thread_, elem, grid);
+
+  if (read_writer.out_of_bounds()) {
     return;
-  }
-
-  // load input into shared memory
-  for (int t = 0; t < elems_per_thread_; t++) {
-    int index = fft_idx + t * m;
-    if (index < length) {
-      float2 elem = in[batch_idx + index];
-      if (inv_) {
-        elem.y = -elem.y;
-      }
-      buf[index] = complex_mul(elem, w_k[index]);
-    } else {
-      buf[index] = 0.0;
-    }
-  }
+  };
+  read_writer.load_padded(length, w_k);
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   int p = 1;
+  int fft_idx = elem.z; // Thread index in DFT
+  int m = grid.z; // Threads per DFT
+  int tg_idx = elem.y * n; // Index of this DFT in threadgroup
+  threadgroup float2* buf = &shared_in[tg_idx];
+
   radix_fft(fft_idx, &p, m, n, buf);
 
   float2 inv = float2(1.0f, -1.0f);
@@ -455,20 +441,9 @@ template <int tg_mem_size>
   p = 1;
   radix_fft(fft_idx, &p, m, n, buf);
 
-  float2 inv_factor = {1.0f / n, -1.0f / n};
   float2 inv_factor_overall = {1.0f / length, -1.0f / length};
 
-  for (int t = 0; t < elems_per_thread_; t++) {
-    int index = fft_idx + t * m;
-    if (index < length) {
-      float2 elem = buf[index + length - 1] * inv_factor;
-      elem = complex_mul(elem, w_k[index]);
-      if (inv_) {
-        elem *= inv_factor_overall;
-      }
-      out[batch_idx + index] = elem;
-    }
-  }
+  read_writer.write_padded(length, w_k);
 }
 
 template <int tg_mem_size>

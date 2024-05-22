@@ -14,6 +14,16 @@ coalesced with accesses from adajcent threads for optimal performance.
 
 using namespace metal;
 
+// struct TransformNone {
+//   static METAL_FUNC float2 apply(float2 x) {
+//     return x;
+//   }
+
+//   static METAL_FUNC float2 apply(float2 x, int index) {
+//     return x;
+//   }
+// };
+
 template <typename in_T, typename out_T>
 struct ReadWriter {
   const device in_T* in;
@@ -91,6 +101,41 @@ struct ReadWriter {
       out[batch_idx + index] = buf[index];
     }
   }
+
+  METAL_FUNC void load_padded(int length, const device float2* w_k) const {
+    // Padded load for Bluestein's algorithm
+    int batch_idx = elem.x * grid.y * length + elem.y * length;
+    int fft_idx = elem.z;
+    int m = grid.z;
+
+    threadgroup float2* seq_buf = buf + elem.y * n;
+    for (int e = 0; e < elems_per_thread; e++) {
+      int index = fft_idx + e * m;
+      if (index < length) {
+        float2 elem = in[batch_idx + index];
+        seq_buf[index] = complex_mul(elem, w_k[index]);
+      } else {
+        seq_buf[index] = 0.0;
+      }
+    }
+  }
+
+  METAL_FUNC void write_padded(int length, const device float2* w_k) const {
+    // Padded write for Bluestein's algorithm
+    int batch_idx = elem.x * grid.y * length + elem.y * length;
+    int fft_idx = elem.z;
+    int m = grid.z;
+    float2 inv_factor = {1.0f / n, -1.0f / n};
+
+    threadgroup float2* seq_buf = buf + elem.y * n;
+    for (int e = 0; e < elems_per_thread; e++) {
+      int index = fft_idx + e * m;
+      if (index < length) {
+        float2 elem = seq_buf[index + length - 1] * inv_factor;
+        out[batch_idx + index] = complex_mul(elem, w_k[index]);
+      }
+    }
+  }
 };
 
 // For RFFT, we interleave batches of two real sequences into one complex one:
@@ -144,8 +189,8 @@ void ReadWriter<float, float2>::write() const {
   short m = grid.z;
   short fft_idx = elem.z;
 
-  for (int t = 0; t < elems_per_thread / 2; t++) {
-    int index = metal::min(fft_idx + t * m, n_over_2 - 1);
+  for (int e = 0; e < elems_per_thread / 2 + 1; e++) {
+    int index = metal::min(fft_idx + e * m, n_over_2 - 1);
     // x_0 = z_0.real
     // y_0 = z_0.imag
     if (index == 0) {
@@ -158,16 +203,6 @@ void ReadWriter<float, float2>::write() const {
       out[batch_idx + index + next_out] =
           complex_mul(((x_k - x_n_minus_k) / 2), minus_j);
     }
-  }
-  // Add in elements up to n/2 + 1
-  int num_left = n_over_2 - (elems_per_thread / 2 * m);
-  if (fft_idx < num_left) {
-    int index = metal::min(fft_idx + elems_per_thread / 2 * m, n_over_2 - 1);
-    float2 x_k = seq_buf[index];
-    float2 x_n_minus_k = seq_buf[n - index] * conj;
-    out[batch_idx + index] = (x_k + x_n_minus_k) / 2;
-    out[batch_idx + index + next_out] =
-        complex_mul(((x_k - x_n_minus_k) / 2), minus_j);
   }
 }
 
@@ -200,30 +235,22 @@ void ReadWriter<float2, float>::load() const {
   float2 conj = {1, -1};
   float2 plus_j = {0, 1};
 
-  for (int t = 0; t < elems_per_thread / 2; t++) {
-    int index = fft_idx + t * m;
+  for (int t = 0; t < elems_per_thread / 2 + 1; t++) {
+    int index = metal::min(fft_idx + t * m, n_over_2 - 1);
     float2 x = in[batch_idx + index];
     float2 y = in[batch_idx + index + next_in];
-    seq_buf[index] = x;
+    bool last_val = n % 2 == 0 && index == n_over_2 - 1;
+    // NumPy ensures last input to even irfft is real
+    if (last_val) {
+      x = float2(x.x, 0);
+      y = float2(y.x, 0);
+    }
     seq_buf[index] = x + complex_mul(y, plus_j);
-    // conjugate for ifft
     seq_buf[index].y = -seq_buf[index].y;
-    if (index > 0) {
+    if (index > 0 && !last_val) {
       seq_buf[n - index] = (x * conj) + complex_mul(y * conj, plus_j);
       seq_buf[n - index].y = -seq_buf[n - index].y;
     }
-  }
-
-  int num_left = n - ((elems_per_thread / 2) * 2 * m) + 1;
-  if (fft_idx < num_left) {
-    int index = fft_idx + elems_per_thread / 2 * m;
-    float2 x = in[batch_idx + index];
-    float2 y = in[batch_idx + index + next_in];
-    // conjugate for ifft
-    seq_buf[index] = x + complex_mul(y, plus_j);
-    seq_buf[index].y = -seq_buf[index].y;
-    seq_buf[n - index] = (x * conj) + complex_mul(y * conj, plus_j);
-    seq_buf[n - index].y = -seq_buf[n - index].y;
   }
 }
 
@@ -245,7 +272,3 @@ void ReadWriter<float2, float>::write() const {
     out[batch_idx + index + next_out] = seq_buf[index].y / -n;
   }
 }
-
-// Strided loading
-
-// Padded loading

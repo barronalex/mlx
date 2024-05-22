@@ -10,26 +10,21 @@ using namespace mlx::core;
 
 TEST_CASE("test fft basics") {
   random::seed(7);
-  int n = 4;
+  int n = 47;
 
   // int n = 13;
   // int batch_size = 131072 * 1024 / n * 2;
-  // int batch_size = 256;
-  // int batch_size = 8192*32;
-  int batch_size = 1;
+  int batch_size = 2;
   // array x = arange(n);
   // x = tile(reshape(x, {1, n}), {batch_size, 1});
   array x = random::normal({batch_size, n});
   // array x = random::normal({batch_size, 4, 4}) +
   //     complex64_t{0.0f, 1.0f} * random::normal({batch_size, 4, 4});
-  x = astype(x, complex64);
-  // std::cout << "x " << x << std::endl;
+  // x = astype(x, complex64);
   // set_default_device(Device::cpu);
-  // array z = fft::rfft(x);
-  // std::cout << "z " << z << std::endl;
-  std::cout << "x " << x << std::endl;
-  set_default_device(Device::gpu);
   array y = fft::fft(x);
+  // std::cout << "z " << z << std::endl;
+  // array y = fft::irfft(z);
   std::cout << "y " << y << std::endl;
   // std::cout << reshape(y, {2, 2, 4}) << std::endl;
   // std::cout << "y " << transpose(reshape(y, {2, 32, 256}), {0, 2, 1}) <<
@@ -310,11 +305,6 @@ TEST_CASE("test fft grads") {
   jvp_out = jvp(rfft_fn, zeros_like(tangent), tangent).second;
   CHECK(array_equal(fft::rfft(tangent), jvp_out).item<bool>());
 
-  // Inverse real
-  auto device = default_device();
-  // Allow running on GPU once grads are implemented for mx.conj
-  set_default_device(Device::cpu);
-
   auto irfft_fn = [](array x) { return fft::irfft(x); };
   cotangent = astype(arange(10), float32);
   vjp_out = vjp(irfft_fn, astype(zeros({6}), complex64), cotangent).second;
@@ -328,8 +318,6 @@ TEST_CASE("test fft grads") {
   tangent = astype(arange(10), complex64);
   jvp_out = jvp(irfft_fn, zeros_like(tangent), tangent).second;
   CHECK(array_equal(fft::irfft(tangent), jvp_out).item<bool>());
-
-  set_default_device(device);
 
   // Check ND vjps run properly
   vjp_out = vjp([](array x) { return fft::fftn(x); },
@@ -350,13 +338,9 @@ TEST_CASE("test fft grads") {
                 .second;
   CHECK_EQ(vjp_out.shape(), std::vector<int>{5, 9});
 
-  set_default_device(Device::cpu);
-
   vjp_out = vjp([](array x) { return fft::irfftn(x); },
                 astype(zeros({5, 5}), complex64),
                 zeros({5, 8}))
                 .second;
   CHECK_EQ(vjp_out.shape(), std::vector<int>{5, 5});
-
-  set_default_device(device);
 }

@@ -53,11 +53,6 @@ class TestFFT(mlx_tests.MLXTestCase):
         x = np.fft.rfft(a_np)
         self.check_mx_np(mx.fft.irfft, np.fft.irfft, x)
 
-        # TODO: IRFFT on GPU only performs correctly for outputs of mx.fft.rfft()
-        with mx.stream(mx.cpu):
-            self.check_mx_np(mx.fft.irfft, np.fft.irfft, x, n=80)
-            self.check_mx_np(mx.fft.irfft, np.fft.irfft, x, n=120)
-
     def test_fftn(self):
         r = np.random.randn(8, 8, 8).astype(np.float32)
         i = np.random.randn(8, 8, 8).astype(np.float32)
@@ -67,13 +62,13 @@ class TestFFT(mlx_tests.MLXTestCase):
         shapes = [None, (10, 5), (5, 10)]
         ops = [
             "fft2",
-            # "ifft2",
-            # "rfft2",
-            # "irfft2",
+            "ifft2",
+            "rfft2",
+            "irfft2",
             "fftn",
-            # "ifftn",
-            # "rfftn",
-            # "irfftn",
+            "ifftn",
+            "rfftn",
+            "irfftn",
         ]
 
         for op, ax, s in itertools.product(ops, axes, shapes):
@@ -99,7 +94,10 @@ class TestFFT(mlx_tests.MLXTestCase):
 
         self.check_mx_np(mx.fft.rfft, np.fft.rfft, r, atol=atol, rtol=rtol)
 
-        # ia_np = np.fft.rfft(a_np)
+        ia_np = np.fft.rfft(a_np)
+        self.check_mx_np(
+            mx.fft.irfft, np.fft.irfft, ia_np, atol=atol, rtol=rtol, n=shape[-1]
+        )
         # self.check_mx_np(mx.fft.irfft, np.fft.irfft, ia_np, atol=atol, rtol=rtol)
 
     def test_fft_shared_mem(self):
@@ -115,6 +113,8 @@ class TestFFT(mlx_tests.MLXTestCase):
         #         [17, 23, 29, 17 * 8 * 3, 23 * 2, 1153, 4006],
         #         # bluestein
         #         [47, 83, 17 * 17, 3109],
+        #         # large stockham
+        #         [3159, 3645, 3969],
         #     ]
         # )
         # for batch_size in (1, 3, 32):
@@ -122,7 +122,10 @@ class TestFFT(mlx_tests.MLXTestCase):
         #         atol = 1e-4 if num < 1025 else 1e-3
         #         self._run_ffts((batch_size, num), atol=atol)
 
-        nums = [i for i in range(2, 512) if all(p <= 13 for p in sympy.primefactors(i))]
+        nums = [
+            i for i in range(2, 4096) if all(p <= 13 for p in sympy.primefactors(i))
+        ]
+        # nums = range(2, 4096)
         for batch_size in (1, 3, 32):
             for num in nums:
                 print(num)
