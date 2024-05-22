@@ -27,6 +27,10 @@ struct ReadWriter {
   int threads_per_tg;
   bool inv;
 
+  // Used for strided access
+  int strided_device_idx = 0;
+  short strided_shared_idx = 0;
+
   METAL_FUNC ReadWriter(
       const device in_T* in_,
       threadgroup float2* buf_,
@@ -108,8 +112,8 @@ struct ReadWriter {
     }
   }
 
+  // Padded IO for Bluestein's algorithm
   METAL_FUNC void load_padded(int length, const device float2* w_k) const {
-    // Padded load for Bluestein's algorithm
     int batch_idx = elem.x * grid.y * length + elem.y * length;
     int fft_idx = elem.z;
     int m = grid.z;
@@ -127,7 +131,6 @@ struct ReadWriter {
   }
 
   METAL_FUNC void write_padded(int length, const device float2* w_k) const {
-    // Padded write for Bluestein's algorithm
     int batch_idx = elem.x * grid.y * length + elem.y * length;
     int fft_idx = elem.z;
     int m = grid.z;
@@ -140,6 +143,58 @@ struct ReadWriter {
         float2 elem = seq_buf[index + length - 1] * inv_factor;
         out[batch_idx + index] = pre_out(complex_mul(elem, w_k[index]), length);
       }
+    }
+  }
+
+  // Strided IO for four step FFT
+  METAL_FUNC void compute_strided_indices(int stride, int overall_n) {
+    // Use the batch threadgroup dimension to coalesce memory accesses:
+    // e.g. stride = 12
+    // device      | shared mem
+    // 0  1  2  3  |  0 12 - -
+    // -  -  -  -  |  1 13 - -
+    // -  -  -  -  |  2 14 - -
+    // 12 13 14 15 |  3 15 - -
+    int coalesce_width = grid.y;
+    int tg_idx = elem.y * grid.z + elem.z;
+    int outer_batch_size = (stride / coalesce_width);
+
+    int strided_batch_idx = (elem.x % outer_batch_size) * coalesce_width +
+        overall_n * (elem.x / outer_batch_size);
+    strided_device_idx = strided_batch_idx +
+        tg_idx / coalesce_width * elems_per_thread * stride +
+        tg_idx % coalesce_width;
+    strided_shared_idx = (tg_idx % coalesce_width) * n +
+        tg_idx / coalesce_width * elems_per_thread;
+  }
+
+  METAL_FUNC void load_strided(int stride, int overall_n) {
+    compute_strided_indices(stride, overall_n);
+    for (int e = 0; e < elems_per_thread; e++) {
+      buf[strided_shared_idx + e] =
+          post_in(in[strided_device_idx + e * stride]);
+    }
+  }
+
+  METAL_FUNC void write_strided(int stride, int overall_n, bool first_step) {
+    // Don't recompute strided indices on first step
+    // where both input and output are strided
+    if (!first_step) {
+      compute_strided_indices(stride, overall_n);
+    }
+    // TODO(alexbarron) genericise this beyond four step FFT
+    for (int e = 0; e < elems_per_thread; e++) {
+      float2 output = buf[strided_shared_idx + e];
+      if (first_step) {
+        // Apply four step twiddles after first step
+        int combined_idx = (strided_device_idx + e * stride) % overall_n;
+        int ij = (combined_idx / stride) * (combined_idx % stride);
+        float2 twiddle = get_twiddle(ij, overall_n);
+        output = complex_mul(output, twiddle);
+      } else {
+        output = pre_out(output, overall_n);
+      }
+      out[strided_device_idx + e * stride] = output;
     }
   }
 };
@@ -278,39 +333,3 @@ void ReadWriter<float2, float>::write() const {
     out[batch_idx + index + next_out] = seq_buf[index].y / -n;
   }
 }
-
-template <typename in_T, typename out_T>
-struct StridedReadWriter {
-  const device in_T* in;
-  threadgroup float2* buf;
-  device out_T* out;
-  int n;
-  int batch_size;
-  int elems_per_thread;
-  uint3 elem;
-  uint3 grid;
-  int threads_per_tg;
-  bool inv;
-  int device_idx;
-  int shared_idx;
-
-  METAL_FUNC StridedReadWriter(
-      const device in_T* in_,
-      threadgroup float2* buf_,
-      device out_T* out_,
-      const short n_,
-      const int batch_size_,
-      const short elems_per_thread_,
-      const uint3 elem_,
-      const uint3 grid_,
-      const bool inv_)
-      : in(in_),
-        buf(buf_),
-        out(out_),
-        n(n_),
-        batch_size(batch_size_),
-        elems_per_thread(elems_per_thread_),
-        elem(elem_),
-        grid(grid_),
-        inv(inv_) {}
-};

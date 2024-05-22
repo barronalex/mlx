@@ -361,11 +361,12 @@ void four_step_fft(
 
   if (plan.bluestein_n == -1) {
     array temp(out.shape(), complex64, nullptr, {});
+    std::cout << "n1 n2 " << plan.n1 << " " << plan.n2 << std::endl;
     FourStepParams four_step_params = {
         /* required= */ true, /* first_step= */ true, plan.n1, plan.n2};
-    fft_op(in, temp, axis, inverse, real, four_step_params, s);
-    four_step_params.first_step = false;
-    fft_op(temp, out, axis, inverse, real, four_step_params, s);
+    fft_op(in, out, axis, inverse, real, four_step_params, s);
+    // four_step_params.first_step = false;
+    // fft_op(temp, out, axis, inverse, real, four_step_params, s);
     copies.push_back(temp);
     return;
   } else {

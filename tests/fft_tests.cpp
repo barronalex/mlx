@@ -10,11 +10,11 @@ using namespace mlx::core;
 
 TEST_CASE("test fft basics") {
   random::seed(7);
-  int n = 17 * 4;
+  int n = 8192;
 
   // int n = 13;
-  int batch_size = 131072 * 1024 / n;
-  // int batch_size = 2;
+  // int batch_size = 131072 * 1024 / n;
+  int batch_size = 1;
   // array x = arange(n);
   // x = tile(reshape(x, {1, n}), {batch_size, 1});
   array x = random::normal({batch_size, n});
@@ -25,7 +25,7 @@ TEST_CASE("test fft basics") {
   array y = fft::fft(x);
   // std::cout << "z " << z << std::endl;
   // array y = fft::irfft(z);
-  std::cout << "y " << y << std::endl;
+  std::cout << "y " << reshape(y, {batch_size, 128, 64}) << std::endl;
   // std::cout << reshape(y, {2, 2, 4}) << std::endl;
   // std::cout << "y " << transpose(reshape(y, {2, 32, 256}), {0, 2, 1}) <<
   // std::endl; std::cout << "y " << reshape(y, {2, 128, 8, 8}) << std::endl;
@@ -33,11 +33,12 @@ TEST_CASE("test fft basics") {
   // std::cout << "y " << reshape(slice(y, {0, 1}, {1, 13}), {3, 4}) <<
   // std::endl; std::cout << "y " << reshape(y, {11, 13, 4, 7}) << std::endl;
 
-  auto bench_fft = [&x]() { return fft::fft(x); };
-  TIME(bench_fft);
+  // auto bench_fft = [&x]() { return fft::fft(x); };
+  // TIME(bench_fft);
 
   set_default_device(Device::cpu);
-  y = fft::fft(x);
+  x = reshape(x, {batch_size, 128, 64});
+  y = fft::fft(x, 1);
   std::cout << "y " << y << std::endl;
   // std::cout << reshape(y, {2, 4, 3}) << std::endl;
   // std::cout << "y " << reshape(y, {2, 256, 32}) << std::endl;

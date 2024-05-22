@@ -52,3 +52,11 @@ METAL_FUNC float2 complex_mul(float2 a, float2 b) {
 METAL_FUNC float2 complex_mul_conj(float2 a, float2 b) {
   return float2(a.x * b.x - a.y * b.y, -a.x * b.y - a.y * b.x);
 }
+
+// Compute an FFT twiddle factor
+METAL_FUNC float2 get_twiddle(int k, int p) {
+  float theta = -2.0f * k * M_PI_F / p;
+
+  float2 twiddle = {metal::fast::cos(theta), metal::fast::sin(theta)};
+  return twiddle;
+}

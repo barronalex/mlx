@@ -52,13 +52,6 @@ STEEL_CONST int rader_4_steps_ [[function_constant(19)]];
 STEEL_CONST int rader_3_steps_ [[function_constant(20)]];
 STEEL_CONST int rader_2_steps_ [[function_constant(21)]];
 
-METAL_FUNC float2 get_twiddle(int k, int p) {
-  float theta = -2.0f * k * M_PI_F / p;
-
-  float2 twiddle = {metal::fast::cos(theta), metal::fast::sin(theta)};
-  return twiddle;
-}
-
 // See "radix.h" for radix codelets
 typedef void (*RadixFunc)(thread float2*, thread float2*);
 
@@ -458,57 +451,35 @@ template <int tg_mem_size>
     uint3 elem [[thread_position_in_grid]],
     uint3 grid [[threads_per_grid]]) {
   // Fast four step FFT implementation for powers of 2.
+  int overall_n = n1 * n2;
   int n = first_step ? n1 : n2;
   int stride = first_step ? n2 : n1;
 
-  int fft_idx = elem.z;
-  int batch_idx = elem.x * grid.y * n + elem.y * n;
-
   // The number of the threads we're using for each DFT
   int m = grid.z;
+  int fft_idx = elem.z;
 
   threadgroup float2 shared_in[tg_mem_size];
   threadgroup float2* buf = &shared_in[elem.y * n];
 
-  // Account for possible extra threadgroups
-  int grid_index = elem.x * grid.y + elem.y;
-  if (grid_index >= batch_size) {
+  thread ReadWriter<float2, float2> read_writer = ReadWriter<float2, float2>(
+      in,
+      &shared_in[0],
+      out,
+      n,
+      batch_size,
+      elems_per_thread_,
+      elem,
+      grid,
+      inv_);
+
+  if (read_writer.out_of_bounds()) {
     return;
-  }
-
-  int overall_n = n1 * n2;
-
-  // For strided reads/writes we use the threadgroup batch dimension
-  // to ensure consecutive memory accesses. e.g. strided read:
-  //
-  // device   | shared mem
-  // 0 1 2 3  |  0 - - -
-  // - - - -  |  1 - - -
-  // - - - -  |  2 - - -
-  // - - - -  |  3 - - -
-  int coalesce_width = grid.y;
-  int tg_idx = elem.y * grid.z + elem.z;
-  int shared_idx = (tg_idx % coalesce_width) * n +
-      tg_idx / coalesce_width * elems_per_thread_;
-  int outer_batch_size = (stride / coalesce_width);
-  int base_batch_idx = (elem.x % outer_batch_size) * coalesce_width +
-      overall_n * (elem.x / outer_batch_size);
-  int device_idx = base_batch_idx +
-      tg_idx / coalesce_width * elems_per_thread_ * stride +
-      tg_idx % coalesce_width;
-
+  };
   if (first_step) {
-    for (int e = 0; e < elems_per_thread_; e++) {
-      shared_in[shared_idx + e] = in[device_idx + e * stride];
-      if (inv_) {
-        shared_in[shared_idx + e].y = -shared_in[shared_idx + e].y;
-      }
-    }
+    read_writer.load_strided(stride, overall_n);
   } else {
-    for (int e = 0; e < elems_per_thread_; e++) {
-      int index = metal::min(fft_idx + e * m, n - 1);
-      buf[index] = in[batch_idx + index];
-    }
+    read_writer.load();
   }
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -516,24 +487,7 @@ template <int tg_mem_size>
   int p = 1;
   perform_fft(fft_idx, &p, m, n, buf);
 
-  if (first_step) {
-    for (int e = 0; e < elems_per_thread_; e++) {
-      int combined_idx = (device_idx + e * stride) % overall_n;
-      int ij = (combined_idx / stride) * (combined_idx % stride);
-      // Apply four step twiddles after first step
-      float2 twiddle = get_twiddle(ij, overall_n);
-      out[device_idx + e * stride] =
-          complex_mul(shared_in[shared_idx + e], twiddle);
-    }
-  } else {
-    for (int e = 0; e < elems_per_thread_; e++) {
-      float2 output = shared_in[shared_idx + e];
-      if (inv_) {
-        output *= float2(1.0f / overall_n, -1.0f / overall_n);
-      }
-      out[device_idx + e * stride] = output;
-    }
-  }
+  read_writer.write_strided(stride, overall_n, first_step);
 }
 
 #define instantiate_fft(tg_mem_size, in_T, out_T)        \
