@@ -90,7 +90,7 @@ class TestFFT(mlx_tests.MLXTestCase):
         i = np.random.rand(*shape).astype(np.float32)
         a_np = r + 1j * i
         self.check_mx_np(mx.fft.fft, np.fft.fft, a_np, atol=atol, rtol=rtol)
-        # self.check_mx_np(mx.fft.ifft, np.fft.ifft, a_np, atol=atol, rtol=rtol)
+        self.check_mx_np(mx.fft.ifft, np.fft.ifft, a_np, atol=atol, rtol=rtol)
 
         self.check_mx_np(mx.fft.rfft, np.fft.rfft, r, atol=atol, rtol=rtol)
 

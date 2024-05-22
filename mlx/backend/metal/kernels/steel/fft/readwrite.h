@@ -4,7 +4,7 @@
 /* FFT helpers for reading and writing from/to device memory.
 
 For many sizes, GPU FFTs are memory bandwidth bound so
-read/write performance is crucial.
+read/write performance is important.
 
 Where possible, we read 128 bits sequentially in each thread,
 coalesced with accesses from adajcent threads for optimal performance.
@@ -13,16 +13,6 @@ coalesced with accesses from adajcent threads for optimal performance.
 #define MAX_RADIX 13
 
 using namespace metal;
-
-// struct TransformNone {
-//   static METAL_FUNC float2 apply(float2 x) {
-//     return x;
-//   }
-
-//   static METAL_FUNC float2 apply(float2 x, int index) {
-//     return x;
-//   }
-// };
 
 template <typename in_T, typename out_T>
 struct ReadWriter {
@@ -35,6 +25,7 @@ struct ReadWriter {
   uint3 elem;
   uint3 grid;
   int threads_per_tg;
+  bool inv;
 
   METAL_FUNC ReadWriter(
       const device in_T* in_,
@@ -44,7 +35,8 @@ struct ReadWriter {
       const int batch_size_,
       const short elems_per_thread_,
       const uint3 elem_,
-      const uint3 grid_)
+      const uint3 grid_,
+      const bool inv_)
       : in(in_),
         buf(buf_),
         out(out_),
@@ -52,11 +44,25 @@ struct ReadWriter {
         batch_size(batch_size_),
         elems_per_thread(elems_per_thread_),
         elem(elem_),
-        grid(grid_) {
+        grid(grid_),
+        inv(inv_) {
     // Account for padding on last threadgroup
     threads_per_tg = elem.x == grid.x - 1
         ? (batch_size - (grid.x - 1) * grid.y) * grid.z
         : grid.y * grid.z;
+  }
+
+  // ifft(x) = 1/n * conj(fft(conj(x)))
+  METAL_FUNC float2 post_in(float2 elem) const {
+    return inv ? float2(elem.x, -elem.y) : elem;
+  }
+
+  METAL_FUNC float2 pre_out(float2 elem) const {
+    return inv ? float2(elem.x / n, -elem.y / n) : elem;
+  }
+
+  METAL_FUNC float2 pre_out(float2 elem, int length) const {
+    return inv ? float2(elem.x / length, -elem.y / length) : elem;
   }
 
   METAL_FUNC bool out_of_bounds() const {
@@ -74,13 +80,13 @@ struct ReadWriter {
     for (short e = 0; e < (elems_per_thread / read_width); e++) {
       short index = read_width * tg_idx + read_width * threads_per_tg * e;
       // vectorized reads
-      buf[index] = in[batch_idx + index];
-      buf[index + 1] = in[batch_idx + index + 1];
+      buf[index] = post_in(in[batch_idx + index]);
+      buf[index + 1] = post_in(in[batch_idx + index + 1]);
     }
     if (elems_per_thread % 2 != 0) {
       short index = tg_idx +
           read_width * threads_per_tg * (elems_per_thread / read_width);
-      buf[index] = in[batch_idx + index];
+      buf[index] = post_in(in[batch_idx + index]);
     }
   }
 
@@ -92,13 +98,13 @@ struct ReadWriter {
     for (short e = 0; e < (elems_per_thread / read_width); e++) {
       short index = read_width * tg_idx + read_width * threads_per_tg * e;
       // vectorized reads
-      out[batch_idx + index] = buf[index];
-      out[batch_idx + index + 1] = buf[index + 1];
+      out[batch_idx + index] = pre_out(buf[index]);
+      out[batch_idx + index + 1] = pre_out(buf[index + 1]);
     }
     if (elems_per_thread % 2 != 0) {
       short index = tg_idx +
           read_width * threads_per_tg * (elems_per_thread / read_width);
-      out[batch_idx + index] = buf[index];
+      out[batch_idx + index] = pre_out(buf[index]);
     }
   }
 
@@ -112,7 +118,7 @@ struct ReadWriter {
     for (int e = 0; e < elems_per_thread; e++) {
       int index = fft_idx + e * m;
       if (index < length) {
-        float2 elem = in[batch_idx + index];
+        float2 elem = post_in(in[batch_idx + index]);
         seq_buf[index] = complex_mul(elem, w_k[index]);
       } else {
         seq_buf[index] = 0.0;
@@ -132,7 +138,7 @@ struct ReadWriter {
       int index = fft_idx + e * m;
       if (index < length) {
         float2 elem = seq_buf[index + length - 1] * inv_factor;
-        out[batch_idx + index] = complex_mul(elem, w_k[index]);
+        out[batch_idx + index] = pre_out(complex_mul(elem, w_k[index]), length);
       }
     }
   }
@@ -272,3 +278,39 @@ void ReadWriter<float2, float>::write() const {
     out[batch_idx + index + next_out] = seq_buf[index].y / -n;
   }
 }
+
+template <typename in_T, typename out_T>
+struct StridedReadWriter {
+  const device in_T* in;
+  threadgroup float2* buf;
+  device out_T* out;
+  int n;
+  int batch_size;
+  int elems_per_thread;
+  uint3 elem;
+  uint3 grid;
+  int threads_per_tg;
+  bool inv;
+  int device_idx;
+  int shared_idx;
+
+  METAL_FUNC StridedReadWriter(
+      const device in_T* in_,
+      threadgroup float2* buf_,
+      device out_T* out_,
+      const short n_,
+      const int batch_size_,
+      const short elems_per_thread_,
+      const uint3 elem_,
+      const uint3 grid_,
+      const bool inv_)
+      : in(in_),
+        buf(buf_),
+        out(out_),
+        n(n_),
+        batch_size(batch_size_),
+        elems_per_thread(elems_per_thread_),
+        elem(elem_),
+        grid(grid_),
+        inv(inv_) {}
+};

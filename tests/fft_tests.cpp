@@ -10,17 +10,17 @@ using namespace mlx::core;
 
 TEST_CASE("test fft basics") {
   random::seed(7);
-  int n = 47;
+  int n = 17 * 4;
 
   // int n = 13;
-  // int batch_size = 131072 * 1024 / n * 2;
-  int batch_size = 2;
+  int batch_size = 131072 * 1024 / n;
+  // int batch_size = 2;
   // array x = arange(n);
   // x = tile(reshape(x, {1, n}), {batch_size, 1});
   array x = random::normal({batch_size, n});
   // array x = random::normal({batch_size, 4, 4}) +
   //     complex64_t{0.0f, 1.0f} * random::normal({batch_size, 4, 4});
-  // x = astype(x, complex64);
+  x = astype(x, complex64);
   // set_default_device(Device::cpu);
   array y = fft::fft(x);
   // std::cout << "z " << z << std::endl;
@@ -33,8 +33,8 @@ TEST_CASE("test fft basics") {
   // std::cout << "y " << reshape(slice(y, {0, 1}, {1, 13}), {3, 4}) <<
   // std::endl; std::cout << "y " << reshape(y, {11, 13, 4, 7}) << std::endl;
 
-  // auto bench_fft = [&x]() { return fft::rfft(x); };
-  // TIME(bench_fft);
+  auto bench_fft = [&x]() { return fft::fft(x); };
+  TIME(bench_fft);
 
   set_default_device(Device::cpu);
   y = fft::fft(x);
