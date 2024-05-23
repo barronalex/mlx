@@ -374,9 +374,6 @@ template <int tg_mem_size>
   }
 }
 
-// - Bluestein
-//   - RFFT
-//   - IRFFT
 // - Strided
 //   - RFFT
 //   - IRFFT
@@ -549,6 +546,7 @@ template <int tg_mem_size>
   instantiate_fft(tg_mem_size, float2, float) \
   instantiate_bluestein(tg_mem_size, float2, float2) \
   instantiate_bluestein(tg_mem_size, float, float2) \
+  instantiate_bluestein(tg_mem_size, float2, float) \
   instantiate_rader(tg_mem_size) \
   instantiate_four_step(tg_mem_size)
 

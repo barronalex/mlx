@@ -30,6 +30,7 @@ using MTLFC = std::tuple<const void*, MTL::DataType, NS::UInteger>;
 #define MAX_BLUESTEIN_FFT_SIZE 2048
 // Threadgroup memory batching improves throughput for small n
 #define MIN_THREADGROUP_MEM_SIZE 256
+#define MIN_COALESCE_WIDTH 4
 
 inline const std::vector<int> supported_radices() {
   // Ordered by preference in decomposition.
@@ -183,7 +184,8 @@ FFTPlan plan_fft(int n) {
       // We only support a single Rader factor currently
       // TODO(alexbarron) investigate weirdness with large
       // Rader sizes -- possibly a compiler issue?
-      if (plan.rader_n > 1 || n > MAX_RADER_FFT_SIZE) {
+      // if (plan.rader_n > 1 || n > MAX_RADER_FFT_SIZE) {
+      if (true) {
         plan.four_step = n > MAX_BLUESTEIN_FFT_SIZE;
         plan.bluestein_n = next_fast_n(2 * n - 1);
         plan.stockham = plan_stockham_fft(plan.bluestein_n);
@@ -555,10 +557,11 @@ void fft_op(
   if (four_step_params.required) {
     // Require a threadgroup batch size of at least 4 for four step FFT
     // so we can coalesce the memory accesses.
-    // TODO: throw an error here
-    threadgroup_batch_size = std::max(threadgroup_batch_size, 4);
+    threadgroup_batch_size =
+        std::max(threadgroup_batch_size, MIN_COALESCE_WIDTH);
   }
   int threadgroup_mem_size = next_power_of_2(threadgroup_batch_size * fft_size);
+  assert(threadgroup_mem_size < MAX_STOCKHAM_FFT_SIZE);
 
   // ceil divide
   int batch_size =

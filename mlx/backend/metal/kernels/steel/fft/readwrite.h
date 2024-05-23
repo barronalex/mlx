@@ -8,6 +8,16 @@ read/write performance is important.
 
 Where possible, we read 128 bits sequentially in each thread,
 coalesced with accesses from adajcent threads for optimal performance.
+
+We implement specialized reading/writing for:
+  - FFT
+  - RFFT
+  - IRFFT
+
+Each with support for:
+  - Contiguous reads
+  - Padded reads (for FFT Convs and Bluestein's)
+  - Strided reads (for 4 step and ND FFTs)
 */
 
 #define MAX_RADIX 13
@@ -333,10 +343,9 @@ void ReadWriter<float, float2>::write_padded(
       out[batch_idx + index + next_out] = float2(elem.y, 0);
     } else {
       float2 x_k = complex_mul(w_k[index], seq_buf[index] * inv_factor);
-      float2 x_n_minus_k =
-          complex_mul(
-              w_k[length - index], seq_buf[length - index] * inv_factor) *
-          conj;
+      float2 x_n_minus_k = complex_mul(
+          w_k[length - index], seq_buf[length - index] * inv_factor);
+      x_n_minus_k *= conj;
       // w_k should happen before this extraction
       out[batch_idx + index] = (x_k + x_n_minus_k) / 2;
       out[batch_idx + index + next_out] =
@@ -379,7 +388,7 @@ void ReadWriter<float2, float>::load() const {
     float2 x = in[batch_idx + index];
     float2 y = in[batch_idx + index + next_in];
     bool last_val = n % 2 == 0 && index == n_over_2 - 1;
-    // NumPy ensures last input to even irfft is real
+    // NumPy forces last input on even irffts to be real
     if (last_val) {
       x = float2(x.x, 0);
       y = float2(y.x, 0);
@@ -409,5 +418,78 @@ void ReadWriter<float2, float>::write() const {
     int index = fft_idx + e * m;
     out[batch_idx + index] = seq_buf[index].x / n;
     out[batch_idx + index + next_out] = seq_buf[index].y / -n;
+  }
+}
+
+template <>
+void ReadWriter<float2, float>::load_padded(
+    int length,
+    const device float2* w_k) const {
+  int n_over_2 = (n / 2) + 1;
+  int length_over_2 = (length / 2) + 1;
+
+  int batch_idx =
+      elem.x * grid.y * length_over_2 * 2 + elem.y * length_over_2 * 2;
+  threadgroup float2* seq_buf = buf + elem.y * n;
+
+  // No out of bounds accesses on odd batch sizes
+  int grid_index = elem.x * grid.y + elem.y;
+  short next_in = batch_size % 2 == 1 && grid_index * 2 == batch_size - 1
+      ? 0
+      : length_over_2;
+
+  short m = grid.z;
+  short fft_idx = elem.z;
+
+  float2 conj = {1, -1};
+  float2 plus_j = {0, 1};
+
+  for (int t = 0; t < elems_per_thread / 2 + 1; t++) {
+    int index = metal::min(fft_idx + t * m, n_over_2 - 1);
+    float2 x = in[batch_idx + index];
+    float2 y = in[batch_idx + index + next_in];
+    if (index < length_over_2) {
+      bool last_val = length % 2 == 0 && index == length_over_2 - 1;
+      if (last_val) {
+        x = float2(x.x, 0);
+        y = float2(y.x, 0);
+      }
+      float2 elem1 = x + complex_mul(y, plus_j);
+      seq_buf[index] = complex_mul(elem1 * conj, w_k[index]);
+      if (index > 0 && !last_val) {
+        float2 elem2 = (x * conj) + complex_mul(y * conj, plus_j);
+        seq_buf[length - index] =
+            complex_mul(elem2 * conj, w_k[length - index]);
+      }
+    } else {
+      short pad_index = metal::min(length + (index - length_over_2) * 2, n - 2);
+      seq_buf[pad_index] = 0;
+      seq_buf[pad_index + 1] = 0;
+    }
+  }
+}
+
+template <>
+void ReadWriter<float2, float>::write_padded(
+    int length,
+    const device float2* w_k) const {
+  int batch_idx = elem.x * grid.y * length * 2 + elem.y * length * 2;
+  threadgroup float2* seq_buf = buf + elem.y * n + length - 1;
+
+  int grid_index = elem.x * grid.y + elem.y;
+  short next_out =
+      batch_size % 2 == 1 && grid_index * 2 == batch_size - 1 ? 0 : length;
+
+  short m = grid.z;
+  short fft_idx = elem.z;
+
+  float2 inv_factor = {1.0f / n, -1.0f / n};
+  for (int e = 0; e < elems_per_thread; e++) {
+    int index = fft_idx + e * m;
+    if (index < length) {
+      float2 output = complex_mul(seq_buf[index] * inv_factor, w_k[index]);
+      out[batch_idx + index] = output.x / length;
+      out[batch_idx + index + next_out] = output.y / -length;
+    }
   }
 }
