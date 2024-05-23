@@ -374,10 +374,17 @@ template <int tg_mem_size>
   }
 }
 
-template <int tg_mem_size>
+// - Bluestein
+//   - RFFT
+//   - IRFFT
+// - Strided
+//   - RFFT
+//   - IRFFT
+
+template <int tg_mem_size, typename in_T, typename out_T>
 [[kernel]] void bluestein_fft(
-    const device float2* in [[buffer(0)]],
-    device float2* out [[buffer(1)]],
+    const device in_T* in [[buffer(0)]],
+    device out_T* out [[buffer(1)]],
     const device float2* w_q [[buffer(2)]],
     const device float2* w_k [[buffer(3)]],
     constant const int& length,
@@ -396,7 +403,7 @@ template <int tg_mem_size>
   //   w_q = np.fft.fft(1/w_k[-n:])
   threadgroup float2 shared_in[tg_mem_size];
 
-  thread ReadWriter<float2, float2> read_writer = ReadWriter<float2, float2>(
+  thread ReadWriter<in_T, out_T> read_writer = ReadWriter<in_T, out_T>(
       in,
       &shared_in[0],
       out,
@@ -434,8 +441,6 @@ template <int tg_mem_size>
   // ifft
   p = 1;
   perform_fft(fft_idx, &p, m, n, buf);
-
-  float2 inv_factor_overall = {1.0f / length, -1.0f / length};
 
   read_writer.write_padded(length, w_k);
 }
@@ -476,11 +481,7 @@ template <int tg_mem_size>
   if (read_writer.out_of_bounds()) {
     return;
   };
-  if (first_step) {
-    read_writer.load_strided(stride, overall_n);
-  } else {
-    read_writer.load();
-  }
+  read_writer.load_strided(stride, overall_n, first_step);
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -515,17 +516,18 @@ template <int tg_mem_size>
       uint3 elem [[thread_position_in_grid]],                           \
       uint3 grid [[threads_per_grid]]);
 
-#define instantiate_bluestein(tg_mem_size)                                  \
-  template [[host_name("bluestein_fft_mem_" #tg_mem_size)]] [[kernel]] void \
-  bluestein_fft<tg_mem_size>(                                               \
-      const device float2* in [[buffer(0)]],                                \
-      device float2* out [[buffer(1)]],                                     \
-      const device float2* w_q [[buffer(2)]],                               \
-      const device float2* w_k [[buffer(2)]],                               \
-      constant const int& length,                                           \
-      constant const int& n,                                                \
-      constant const int& batch_size,                                       \
-      uint3 elem [[thread_position_in_grid]],                               \
+#define instantiate_bluestein(tg_mem_size, in_T, out_T)            \
+  template [[host_name("bluestein_fft_mem_" #tg_mem_size "_" #in_T \
+                       "_" #out_T)]] [[kernel]] void               \
+  bluestein_fft<tg_mem_size>(                                      \
+      const device in_T* in [[buffer(0)]],                         \
+      device out_T* out [[buffer(1)]],                             \
+      const device float2* w_q [[buffer(2)]],                      \
+      const device float2* w_k [[buffer(2)]],                      \
+      constant const int& length,                                  \
+      constant const int& n,                                       \
+      constant const int& batch_size,                              \
+      uint3 elem [[thread_position_in_grid]],                      \
       uint3 grid [[threads_per_grid]]);
 
 #define instantiate_four_step(tg_mem_size)                              \
@@ -545,8 +547,9 @@ template <int tg_mem_size>
   instantiate_fft(tg_mem_size, float2, float2) \
   instantiate_fft(tg_mem_size, float, float2) \
   instantiate_fft(tg_mem_size, float2, float) \
+  instantiate_bluestein(tg_mem_size, float2, float2) \
+  instantiate_bluestein(tg_mem_size, float, float2) \
   instantiate_rader(tg_mem_size) \
-  instantiate_bluestein(tg_mem_size) \
   instantiate_four_step(tg_mem_size)
 
 // It's substantially faster to statically define the

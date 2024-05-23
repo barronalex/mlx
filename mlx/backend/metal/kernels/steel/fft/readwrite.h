@@ -29,7 +29,7 @@ struct ReadWriter {
 
   // Used for strided access
   int strided_device_idx = 0;
-  short strided_shared_idx = 0;
+  int strided_shared_idx = 0;
 
   METAL_FUNC ReadWriter(
       const device in_T* in_,
@@ -157,7 +157,7 @@ struct ReadWriter {
     // 12 13 14 15 |  3 15 - -
     int coalesce_width = grid.y;
     int tg_idx = elem.y * grid.z + elem.z;
-    int outer_batch_size = (stride / coalesce_width);
+    int outer_batch_size = stride / coalesce_width;
 
     int strided_batch_idx = (elem.x % outer_batch_size) * coalesce_width +
         overall_n * (elem.x / outer_batch_size);
@@ -168,11 +168,19 @@ struct ReadWriter {
         tg_idx / coalesce_width * elems_per_thread;
   }
 
-  METAL_FUNC void load_strided(int stride, int overall_n) {
-    compute_strided_indices(stride, overall_n);
-    for (int e = 0; e < elems_per_thread; e++) {
-      buf[strided_shared_idx + e] =
-          post_in(in[strided_device_idx + e * stride]);
+  METAL_FUNC void load_strided(int stride, int overall_n, bool first_step) {
+    if (first_step) {
+      compute_strided_indices(stride, overall_n);
+      for (int e = 0; e < elems_per_thread; e++) {
+        buf[strided_shared_idx + e] =
+            post_in(in[strided_device_idx + e * stride]);
+      }
+    } else {
+      // Don't invert between steps
+      bool default_inv = inv;
+      inv = false;
+      load();
+      inv = default_inv;
     }
   }
 
@@ -260,6 +268,76 @@ void ReadWriter<float, float2>::write() const {
     } else {
       float2 x_k = seq_buf[index];
       float2 x_n_minus_k = seq_buf[n - index] * conj;
+      out[batch_idx + index] = (x_k + x_n_minus_k) / 2;
+      out[batch_idx + index + next_out] =
+          complex_mul(((x_k - x_n_minus_k) / 2), minus_j);
+    }
+  }
+}
+
+template <>
+void ReadWriter<float, float2>::load_padded(
+    int length,
+    const device float2* w_k) const {
+  int batch_idx = elem.x * grid.y * length * 2 + elem.y * length * 2;
+  threadgroup float2* seq_buf = buf + elem.y * n;
+
+  // No out of bounds accesses on odd batch sizes
+  int grid_index = elem.x * grid.y + elem.y;
+  short next_in =
+      batch_size % 2 == 1 && grid_index * 2 == batch_size - 1 ? 0 : length;
+
+  short m = grid.z;
+  short fft_idx = elem.z;
+
+  for (int e = 0; e < elems_per_thread; e++) {
+    int index = metal::min(fft_idx + e * m, n - 1);
+    if (index < length) {
+      float2 elem =
+          float2(in[batch_idx + index], in[batch_idx + index + next_in]);
+      seq_buf[index] = complex_mul(elem, w_k[index]);
+    } else {
+      seq_buf[index] = 0;
+    }
+  }
+}
+
+template <>
+void ReadWriter<float, float2>::write_padded(
+    int length,
+    const device float2* w_k) const {
+  int length_over_2 = (length / 2) + 1;
+  int batch_idx =
+      elem.x * grid.y * length_over_2 * 2 + elem.y * length_over_2 * 2;
+  threadgroup float2* seq_buf = buf + elem.y * n + length - 1;
+
+  int grid_index = elem.x * grid.y + elem.y;
+  short next_out = batch_size % 2 == 1 && grid_index * 2 == batch_size - 1
+      ? 0
+      : length_over_2;
+
+  float2 conj = {1, -1};
+  float2 inv_factor = {1.0f / n, -1.0f / n};
+  float2 minus_j = {0, -1};
+
+  short m = grid.z;
+  short fft_idx = elem.z;
+
+  for (int e = 0; e < elems_per_thread / 2 + 1; e++) {
+    int index = metal::min(fft_idx + e * m, length_over_2 - 1);
+    // x_0 = z_0.real
+    // y_0 = z_0.imag
+    if (index == 0) {
+      float2 elem = complex_mul(w_k[index], seq_buf[index] * inv_factor);
+      out[batch_idx + index] = float2(elem.x, 0);
+      out[batch_idx + index + next_out] = float2(elem.y, 0);
+    } else {
+      float2 x_k = complex_mul(w_k[index], seq_buf[index] * inv_factor);
+      float2 x_n_minus_k =
+          complex_mul(
+              w_k[length - index], seq_buf[length - index] * inv_factor) *
+          conj;
+      // w_k should happen before this extraction
       out[batch_idx + index] = (x_k + x_n_minus_k) / 2;
       out[batch_idx + index + next_out] =
           complex_mul(((x_k - x_n_minus_k) / 2), minus_j);

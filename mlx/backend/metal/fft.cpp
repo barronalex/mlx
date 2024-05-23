@@ -361,12 +361,12 @@ void four_step_fft(
 
   if (plan.bluestein_n == -1) {
     array temp(out.shape(), complex64, nullptr, {});
-    std::cout << "n1 n2 " << plan.n1 << " " << plan.n2 << std::endl;
+    // std::cout << "n1 n2 " << plan.n1 << " " << plan.n2 << std::endl;
     FourStepParams four_step_params = {
         /* required= */ true, /* first_step= */ true, plan.n1, plan.n2};
-    fft_op(in, out, axis, inverse, real, four_step_params, s);
-    // four_step_params.first_step = false;
-    // fft_op(temp, out, axis, inverse, real, four_step_params, s);
+    fft_op(in, temp, axis, inverse, real, four_step_params, s);
+    four_step_params.first_step = false;
+    fft_op(temp, out, axis, inverse, real, four_step_params, s);
     copies.push_back(temp);
     return;
   } else {
@@ -579,20 +579,21 @@ void fft_op(
   // std::cout << "n " << n << std::endl;
 
   auto& compute_encoder = d.get_command_encoder(s.index);
+  auto in_type_str = in.dtype() == float32 ? "float" : "float2";
+  auto out_type_str = out.dtype() == float32 ? "float" : "float2";
   {
     std::ostringstream kname;
     std::string inv_string = inverse ? "true" : "false";
     if (plan.bluestein_n > 0) {
-      kname << "bluestein_fft_mem_" << threadgroup_mem_size;
+      kname << "bluestein_fft_mem_" << threadgroup_mem_size << "_"
+            << in_type_str << "_" << out_type_str;
     } else if (plan.rader_n > 1) {
       kname << "rader_fft_mem_" << threadgroup_mem_size;
     } else if (four_step_params.required) {
       kname << "four_step_mem_" << threadgroup_mem_size;
     } else {
-      auto in_type = in.dtype() == float32 ? "float" : "float2";
-      auto out_type = out.dtype() == float32 ? "float" : "float2";
-      kname << "fft_mem_" << threadgroup_mem_size << "_" << in_type << "_"
-            << out_type;
+      kname << "fft_mem_" << threadgroup_mem_size << "_" << in_type_str << "_"
+            << out_type_str;
     }
     std::string base_name = kname.str();
     // We use a specialized kernel for each FFT size
