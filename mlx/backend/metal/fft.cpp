@@ -230,7 +230,6 @@ void compute_bluestein_constants(
   // w_k = np.exp(-1j * np.pi / N * (np.arange(-N + 1, N) ** 2))
   // w_q = np.fft.fft(1/w_k)
   // return w_k, w_q
-
   size_t fft_size = w_q.shape(0);
 
   int length = 2 * n - 1;
@@ -362,11 +361,22 @@ void four_step_fft(
   auto& d = metal::device(s.device);
 
   if (plan.bluestein_n == -1) {
-    array temp(out.shape(), complex64, nullptr, {});
-    // std::cout << "n1 n2 " << plan.n1 << " " << plan.n2 << std::endl;
     FourStepParams four_step_params = {
         /* required= */ true, /* first_step= */ true, plan.n1, plan.n2};
-    fft_op(in, temp, axis, inverse, real, four_step_params, s);
+    auto temp_shape = in.shape();
+    if (real) {
+      // For RFFT, we convert an even RFFT of size n to an FFT of size n/2
+      four_step_params.n2 /= 2;
+      temp_shape[axis] = in.shape(axis) / 2;
+    }
+    array temp(temp_shape, complex64, nullptr, {});
+    std::cout << "n1 n2 " << four_step_params.n1 << " " << four_step_params.n2
+              << std::endl;
+    // Nice trick here:
+    // For the N/2 RFFT algorithm we need to pack odd and even float32s into a
+    // single complex64. Since our input is contiguous we can just treat the
+    // float32 as complex64
+    fft_op(in, temp, axis, inverse, /*real=*/false, four_step_params, s);
     four_step_params.first_step = false;
     fft_op(temp, out, axis, inverse, real, four_step_params, s);
     copies.push_back(temp);
@@ -548,8 +558,10 @@ void fft_op(
   func_consts.push_back(make_int(&rader_m, 3));
 
   // The overall number of FFTs we're going to compute for this input
-  int total_batch_size =
-      out.dtype() == float32 ? out.size() / n : in.size() / n;
+  int total_batch_size = out.dtype() == float32 ||
+          (four_step_params.required && four_step_params.first_step)
+      ? out.size() / n
+      : in.size() / n;
   int threads_per_fft = (fft_size + elems_per_thread - 1) / elems_per_thread;
 
   // We batch among threadgroups for improved efficiency when n is small
@@ -567,23 +579,23 @@ void fft_op(
   int batch_size =
       (total_batch_size + threadgroup_batch_size - 1) / threadgroup_batch_size;
 
-  if (real) {
+  if (real && !four_step_params.required) {
     // We can perform 2 RFFTs at once so the batch size is halved.
     batch_size = (batch_size + 2 - 1) / 2;
   }
   int out_buffer_size = out.size();
 
-  // std::cout << "elems per thread " << elems_per_thread << std::endl;
-  // std::cout << "batch_size " << batch_size << std::endl;
-  // std::cout << "threadgroup_batch_size " << threadgroup_batch_size <<
-  // std::endl; std::cout << "threads per fft " << threads_per_fft << std::endl;
-  // std::cout << "total_batch_size " << total_batch_size << std::endl;
+  std::cout << "elems per thread " << elems_per_thread << std::endl;
+  std::cout << "batch_size " << batch_size << std::endl;
+  std::cout << "threadgroup_batch_size " << threadgroup_batch_size << std::endl;
+  std::cout << "threads per fft " << threads_per_fft << std::endl;
+  std::cout << "total_batch_size " << total_batch_size << std::endl;
 
-  // std::cout << "n " << n << std::endl;
+  std::cout << "n " << n << std::endl;
 
   auto& compute_encoder = d.get_command_encoder(s.index);
-  auto in_type_str = in.dtype() == float32 ? "float" : "float2";
-  auto out_type_str = out.dtype() == float32 ? "float" : "float2";
+  auto in_type_str = real && !inverse ? "float" : "float2";
+  auto out_type_str = real && inverse ? "float" : "float2";
   {
     std::ostringstream kname;
     std::string inv_string = inverse ? "true" : "false";
@@ -593,7 +605,8 @@ void fft_op(
     } else if (plan.rader_n > 1) {
       kname << "rader_fft_mem_" << threadgroup_mem_size;
     } else if (four_step_params.required) {
-      kname << "four_step_mem_" << threadgroup_mem_size;
+      kname << "four_step_mem_" << threadgroup_mem_size << "_" << in_type_str
+            << "_" << out_type_str;
     } else {
       kname << "fft_mem_" << threadgroup_mem_size << "_" << in_type_str << "_"
             << out_type_str;

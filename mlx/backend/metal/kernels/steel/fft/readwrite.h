@@ -24,7 +24,7 @@ Each with support for:
 
 using namespace metal;
 
-template <typename in_T, typename out_T>
+template <typename in_T, typename out_T, bool four_step = false>
 struct ReadWriter {
   const device in_T* in;
   threadgroup float2* buf;
@@ -225,14 +225,14 @@ struct ReadWriter {
 //
 // This roughly doubles the throughput over the regular FFT.
 template <>
-bool ReadWriter<float, float2>::out_of_bounds() const {
+METAL_FUNC bool ReadWriter<float, float2>::out_of_bounds() const {
   int grid_index = elem.x * grid.y + elem.y;
   // We pack two sequences into one for RFFTs
   return grid_index * 2 >= batch_size;
 }
 
 template <>
-void ReadWriter<float, float2>::load() const {
+METAL_FUNC void ReadWriter<float, float2>::load() const {
   int batch_idx = elem.x * grid.y * n * 2 + elem.y * n * 2;
   threadgroup float2* seq_buf = buf + elem.y * n;
 
@@ -252,7 +252,7 @@ void ReadWriter<float, float2>::load() const {
 }
 
 template <>
-void ReadWriter<float, float2>::write() const {
+METAL_FUNC void ReadWriter<float, float2>::write() const {
   short n_over_2 = (n / 2) + 1;
 
   int batch_idx = elem.x * grid.y * n_over_2 * 2 + elem.y * n_over_2 * 2;
@@ -286,7 +286,7 @@ void ReadWriter<float, float2>::write() const {
 }
 
 template <>
-void ReadWriter<float, float2>::load_padded(
+METAL_FUNC void ReadWriter<float, float2>::load_padded(
     int length,
     const device float2* w_k) const {
   int batch_idx = elem.x * grid.y * length * 2 + elem.y * length * 2;
@@ -313,7 +313,7 @@ void ReadWriter<float, float2>::load_padded(
 }
 
 template <>
-void ReadWriter<float, float2>::write_padded(
+METAL_FUNC void ReadWriter<float, float2>::write_padded(
     int length,
     const device float2* w_k) const {
   int length_over_2 = (length / 2) + 1;
@@ -354,20 +354,83 @@ void ReadWriter<float, float2>::write_padded(
   }
 }
 
+// RFFT four step only needs to be specialized for the last step
+template <>
+METAL_FUNC bool ReadWriter<float, float2, true>::out_of_bounds() const {
+  int grid_index = elem.x * grid.y + elem.y;
+  return grid_index >= batch_size;
+}
+
+template <>
+METAL_FUNC void ReadWriter<float, float2, true>::load_strided(
+    int stride,
+    int overall_n,
+    bool first_step) {
+  // Silence compiler warnings
+  (void)first_step;
+  (void)overall_n;
+  (void)stride;
+
+  // We need the corresponding elements in the RFFT algorithm (k, n/2 - k)
+  // to be in the same threadgroup so we have to permute the batches here.
+  // X_e = (Z[k] + Z*[n/2 - k])/2
+  // x x x x - - - - = = = = = = = = - - - - x x x x
+  int grid_index = elem.x * grid.y + elem.y;
+  int base_batch_index = grid_index / stride;
+  int inner_index = grid_index % stride;
+  int batch_idx = inner_index % 2 == 0 ? (inner_index / 2) * n
+                                       : overall_n - (inner_index + 1) * n;
+
+  auto in_complex = (const device float2*)in;
+  int fft_idx = elem.z;
+  int m = grid.z;
+  threadgroup float2* seq_buf = buf + elem.y * n;
+
+  for (int e = 0; e < elems_per_thread; e++) {
+    int index = fft_idx + e * m;
+    // seq_buf[index] = in_complex[batch_idx + index];
+    seq_buf[index] = batch_idx + index;
+  }
+}
+
+template <>
+METAL_FUNC void ReadWriter<float, float2, true>::write_strided(
+    int stride,
+    int overall_n,
+    bool first_step) {
+  // Silence compiler warnings
+  (void)first_step;
+
+  int batch_idx = elem.x * grid.y * n + elem.y * n;
+  int fft_idx = elem.z;
+  int m = grid.z;
+  threadgroup float2* seq_buf = buf + elem.y * n;
+  for (int e = 0; e < elems_per_thread; e++) {
+    int index = fft_idx + e * m;
+    out[batch_idx + index] = seq_buf[index];
+  }
+
+  // compute_strided_indices(stride, overall_n);
+  // for (int e = 0; e < elems_per_thread; e++) {
+  //   // Now it's time to unpack the RFFT
+  //   out[strided_device_idx + e * stride] = buf[strided_shared_idx + e];
+  // }
+}
+
 // For IRFFT, we do the opposite
 //
 // Z_k = X_k + j.Y_k
 // x_k = Re(Z_k)
 // Y_k = Imag(Z_k)
 template <>
-bool ReadWriter<float2, float>::out_of_bounds() const {
+METAL_FUNC bool ReadWriter<float2, float>::out_of_bounds() const {
   int grid_index = elem.x * grid.y + elem.y;
   // We pack two sequences into one for IRFFTs
   return grid_index * 2 >= batch_size;
 }
 
 template <>
-void ReadWriter<float2, float>::load() const {
+METAL_FUNC void ReadWriter<float2, float>::load() const {
   short n_over_2 = (n / 2) + 1;
   int batch_idx = elem.x * grid.y * n_over_2 * 2 + elem.y * n_over_2 * 2;
   threadgroup float2* seq_buf = buf + elem.y * n;
@@ -403,7 +466,7 @@ void ReadWriter<float2, float>::load() const {
 }
 
 template <>
-void ReadWriter<float2, float>::write() const {
+METAL_FUNC void ReadWriter<float2, float>::write() const {
   int batch_idx = elem.x * grid.y * n * 2 + elem.y * n * 2;
   threadgroup float2* seq_buf = buf + elem.y * n;
 
@@ -422,7 +485,7 @@ void ReadWriter<float2, float>::write() const {
 }
 
 template <>
-void ReadWriter<float2, float>::load_padded(
+METAL_FUNC void ReadWriter<float2, float>::load_padded(
     int length,
     const device float2* w_k) const {
   int n_over_2 = (n / 2) + 1;
@@ -470,7 +533,7 @@ void ReadWriter<float2, float>::load_padded(
 }
 
 template <>
-void ReadWriter<float2, float>::write_padded(
+METAL_FUNC void ReadWriter<float2, float>::write_padded(
     int length,
     const device float2* w_k) const {
   int batch_idx = elem.x * grid.y * length * 2 + elem.y * length * 2;

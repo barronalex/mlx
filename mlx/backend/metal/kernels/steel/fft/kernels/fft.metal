@@ -442,10 +442,10 @@ template <int tg_mem_size, typename in_T, typename out_T>
   read_writer.write_padded(length, w_k);
 }
 
-template <int tg_mem_size>
+template <int tg_mem_size, typename in_T, typename out_T>
 [[kernel]] void four_step_fft(
-    const device float2* in [[buffer(0)]],
-    device float2* out [[buffer(1)]],
+    const device in_T* in [[buffer(0)]],
+    device out_T* out [[buffer(1)]],
     constant const int& n1,
     constant const int& n2,
     constant const int& batch_size,
@@ -464,7 +464,8 @@ template <int tg_mem_size>
   threadgroup float2 shared_in[tg_mem_size];
   threadgroup float2* buf = &shared_in[elem.y * n];
 
-  thread ReadWriter<float2, float2> read_writer = ReadWriter<float2, float2>(
+  using read_writer_t = ReadWriter<in_T, out_T, /*four_step=*/true>;
+  read_writer_t read_writer = read_writer_t(
       in,
       &shared_in[0],
       out,
@@ -482,8 +483,8 @@ template <int tg_mem_size>
 
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  int p = 1;
-  perform_fft(fft_idx, &p, m, n, buf);
+  // int p = 1;
+  // perform_fft(fft_idx, &p, m, n, buf);
 
   read_writer.write_strided(stride, overall_n, first_step);
 }
@@ -516,7 +517,7 @@ template <int tg_mem_size>
 #define instantiate_bluestein(tg_mem_size, in_T, out_T)            \
   template [[host_name("bluestein_fft_mem_" #tg_mem_size "_" #in_T \
                        "_" #out_T)]] [[kernel]] void               \
-  bluestein_fft<tg_mem_size>(                                      \
+  bluestein_fft<tg_mem_size, in_T, out_T>(                         \
       const device in_T* in [[buffer(0)]],                         \
       device out_T* out [[buffer(1)]],                             \
       const device float2* w_q [[buffer(2)]],                      \
@@ -527,16 +528,17 @@ template <int tg_mem_size>
       uint3 elem [[thread_position_in_grid]],                      \
       uint3 grid [[threads_per_grid]]);
 
-#define instantiate_four_step(tg_mem_size)                              \
-  template [[host_name("four_step_mem_" #tg_mem_size)]] [[kernel]] void \
-  four_step_fft<tg_mem_size>(                                           \
-      const device float2* in [[buffer(0)]],                            \
-      device float2* out [[buffer(1)]],                                 \
-      constant const int& n1,                                           \
-      constant const int& n2,                                           \
-      constant const int& batch_size,                                   \
-      constant const bool& first_step,                                  \
-      uint3 elem [[thread_position_in_grid]],                           \
+#define instantiate_four_step(tg_mem_size, in_T, out_T)        \
+  template [[host_name("four_step_mem_" #tg_mem_size "_" #in_T \
+                       "_" #out_T)]] [[kernel]] void           \
+  four_step_fft<tg_mem_size, in_T, out_T>(                     \
+      const device in_T* in [[buffer(0)]],                     \
+      device out_T* out [[buffer(1)]],                         \
+      constant const int& n1,                                  \
+      constant const int& n2,                                  \
+      constant const int& batch_size,                          \
+      constant const bool& first_step,                         \
+      uint3 elem [[thread_position_in_grid]],                  \
       uint3 grid [[threads_per_grid]]);
 
 // clang-format off
@@ -547,8 +549,9 @@ template <int tg_mem_size>
   instantiate_bluestein(tg_mem_size, float2, float2) \
   instantiate_bluestein(tg_mem_size, float, float2) \
   instantiate_bluestein(tg_mem_size, float2, float) \
-  instantiate_rader(tg_mem_size) \
-  instantiate_four_step(tg_mem_size)
+  instantiate_four_step(tg_mem_size, float2, float2) \
+  instantiate_four_step(tg_mem_size, float, float2) \
+  instantiate_rader(tg_mem_size)
 
 // It's substantially faster to statically define the
 // threadgroup memory size rather than using
