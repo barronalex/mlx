@@ -171,6 +171,7 @@ FFTPlan plan_fft(int n) {
     // Rough heuristic for choosing faster powers of two when we can
     plan.n2 = n > 65536 ? 1024 : 64;
     plan.n1 = n / plan.n2;
+    // std::cout << "n1 n2 " << plan.n1 << " " << plan.n2 << std::endl;
     return plan;
   } else if (n > MAX_STOCKHAM_FFT_SIZE) {
     // Otherwise we use a multi-upload Bluestein's
@@ -367,6 +368,7 @@ void four_step_fft(
     fft_op(in, temp, axis, inverse, real, four_step_params, s);
     four_step_params.first_step = false;
     fft_op(temp, out, axis, inverse, real, four_step_params, s);
+    // std::cout << "out shape " << out.shape(1) << std::endl;
     copies.push_back(temp);
   } else {
     int n = in.shape(axis);
@@ -490,7 +492,7 @@ void fft_op(
   // real to complex: n -> (n/2)+1
   // complex to real: (n/2)+1 -> n
   auto out_strides = in_contiguous.strides();
-  if (in.dtype() != out.dtype()) {
+  if (in.shape(axis) != out.shape(axis)) {
     for (int i = 0; i < out_strides.size(); i++) {
       if (out_strides[i] != 1) {
         out_strides[i] = out_strides[i] / in.shape(axis) * out.shape(axis);
@@ -558,7 +560,7 @@ void fft_op(
         std::max(threadgroup_batch_size, MIN_COALESCE_WIDTH);
   }
   int threadgroup_mem_size = next_power_of_2(threadgroup_batch_size * fft_size);
-  assert(threadgroup_mem_size < MAX_STOCKHAM_FFT_SIZE);
+  assert(threadgroup_mem_size <= MAX_STOCKHAM_FFT_SIZE);
 
   // ceil divide
   int batch_size =
@@ -570,12 +572,19 @@ void fft_op(
   }
   int out_buffer_size = out.size();
 
+  // std::cout << "elems per thread " << elems_per_thread << std::endl;
+  // std::cout << " batch size " << batch_size << std::endl;
+  // std::cout << " total batch size " << total_batch_size << std::endl;
+  // std::cout << " threadgroup batch size " << threadgroup_batch_size <<
+  // std::endl;
+
   auto& compute_encoder = d.get_command_encoder(s.index);
-  auto in_type_str = real && !inverse ? "float" : "float2";
-  auto out_type_str = real && inverse ? "float" : "float2";
+  auto in_type_str = in.dtype() == float32 ? "float" : "float2";
+  auto out_type_str = out.dtype() == float32 ? "float" : "float2";
   {
     std::ostringstream kname;
     std::string inv_string = inverse ? "true" : "false";
+    std::string real_string = real ? "true" : "false";
     if (plan.bluestein_n > 0) {
       kname << "bluestein_fft_mem_" << threadgroup_mem_size << "_"
             << in_type_str << "_" << out_type_str;
@@ -585,7 +594,7 @@ void fft_op(
     } else if (four_step_params.required) {
       auto step = four_step_params.first_step ? "0" : "1";
       kname << "four_step_mem_" << threadgroup_mem_size << "_" << in_type_str
-            << "_" << out_type_str << "_" << step;
+            << "_" << out_type_str << "_" << step << "_" << real_string;
     } else {
       kname << "fft_mem_" << threadgroup_mem_size << "_" << in_type_str << "_"
             << out_type_str;

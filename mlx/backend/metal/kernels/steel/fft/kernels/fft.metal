@@ -440,7 +440,12 @@ template <int tg_mem_size, typename in_T, typename out_T>
   read_writer.write_padded(length, w_k);
 }
 
-template <int tg_mem_size, typename in_T, typename out_T, int step>
+template <
+    int tg_mem_size,
+    typename in_T,
+    typename out_T,
+    int step,
+    bool real = false>
 [[kernel]] void four_step_fft(
     const device in_T* in [[buffer(0)]],
     device out_T* out [[buffer(1)]],
@@ -461,7 +466,7 @@ template <int tg_mem_size, typename in_T, typename out_T, int step>
   threadgroup float2 shared_in[tg_mem_size];
   threadgroup float2* buf = &shared_in[elem.y * n];
 
-  using read_writer_t = ReadWriter<in_T, out_T, step>;
+  using read_writer_t = ReadWriter<in_T, out_T, step, real>;
   read_writer_t read_writer = read_writer_t(
       in,
       &shared_in[0],
@@ -519,17 +524,17 @@ template <int tg_mem_size, typename in_T, typename out_T, int step>
       const device in_T* in [[buffer(0)]],                         \
       device out_T* out [[buffer(1)]],                             \
       const device float2* w_q [[buffer(2)]],                      \
-      const device float2* w_k [[buffer(2)]],                      \
+      const device float2* w_k [[buffer(3)]],                      \
       constant const int& length,                                  \
       constant const int& n,                                       \
       constant const int& batch_size,                              \
       uint3 elem [[thread_position_in_grid]],                      \
       uint3 grid [[threads_per_grid]]);
 
-#define instantiate_four_step(tg_mem_size, in_T, out_T, step)             \
+#define instantiate_four_step(tg_mem_size, in_T, out_T, step, real)       \
   template [[host_name("four_step_mem_" #tg_mem_size "_" #in_T "_" #out_T \
-                       "_" #step)]] [[kernel]] void                       \
-  four_step_fft<tg_mem_size, in_T, out_T, step>(                          \
+                       "_" #step "_" #real)]] [[kernel]] void             \
+  four_step_fft<tg_mem_size, in_T, out_T, step, real>(                    \
       const device in_T* in [[buffer(0)]],                                \
       device out_T* out [[buffer(1)]],                                    \
       constant const int& n1,                                             \
@@ -549,8 +554,10 @@ template <int tg_mem_size, typename in_T, typename out_T, int step>
   instantiate_bluestein(tg_mem_size, float2, float2) \
   instantiate_bluestein(tg_mem_size, float, float2) \
   instantiate_bluestein(tg_mem_size, float2, float) \
-  instantiate_four_step(tg_mem_size, float2, float2, 0) \
-  instantiate_four_step(tg_mem_size, float2, float2, 1) \
+  instantiate_four_step(tg_mem_size, float2, float2, 0, false) \
+  instantiate_four_step(tg_mem_size, float2, float2, 1, false) \
+  instantiate_four_step(tg_mem_size, float, float2, 0, true) \
+  instantiate_four_step(tg_mem_size, float2, float2, 1, true)
 
 // It's substantially faster to statically define the
 // threadgroup memory size rather than using

@@ -24,7 +24,11 @@ Each with support for:
 
 using namespace metal;
 
-template <typename in_T, typename out_T, int step = -1>
+template <
+    typename in_T,
+    typename out_T,
+    int step = 0,
+    bool four_step_real = false>
 struct ReadWriter {
   const device in_T* in;
   threadgroup float2* buf;
@@ -69,6 +73,11 @@ struct ReadWriter {
   // ifft(x) = 1/n * conj(fft(conj(x)))
   METAL_FUNC float2 post_in(float2 elem) const {
     return inv ? float2(elem.x, -elem.y) : elem;
+  }
+
+  // Handle float case for generic RFFT alg
+  METAL_FUNC float2 post_in(float elem) const {
+    return float2(elem, 0);
   }
 
   METAL_FUNC float2 pre_out(float2 elem) const {
@@ -186,44 +195,52 @@ struct ReadWriter {
         tg_idx / coalesce_width * elems_per_thread;
   }
 
+  // Four Step FFT First Step
   METAL_FUNC void load_strided(int stride, int overall_n) {
-    if (step == 0) {
-      compute_strided_indices(stride, overall_n);
-      for (int e = 0; e < elems_per_thread; e++) {
-        buf[strided_shared_idx + e] =
-            post_in(in[strided_device_idx + e * stride]);
-      }
-    } else {
-      // Don't invert between steps
-      bool default_inv = inv;
-      inv = false;
-      load();
-      inv = default_inv;
+    compute_strided_indices(stride, overall_n);
+    for (int e = 0; e < elems_per_thread; e++) {
+      buf[strided_shared_idx + e] =
+          post_in(in[strided_device_idx + e * stride]);
     }
   }
 
   METAL_FUNC void write_strided(int stride, int overall_n) {
-    // Don't recompute strided indices on first step
-    // when they've already been computed for the load.
-    if (step == 1) {
-      compute_strided_indices(stride, overall_n);
-    }
-    // TODO(alexbarron) genericise this beyond four step FFT
     for (int e = 0; e < elems_per_thread; e++) {
       float2 output = buf[strided_shared_idx + e];
-      if (step == 0) {
-        // Apply four step twiddles after first step
-        int combined_idx = (strided_device_idx + e * stride) % overall_n;
-        int ij = (combined_idx / stride) * (combined_idx % stride);
-        float2 twiddle = get_twiddle(ij, overall_n);
-        output = complex_mul(output, twiddle);
-      } else {
-        output = pre_out(output, overall_n);
-      }
-      out[strided_device_idx + e * stride] = output;
+      int combined_idx = (strided_device_idx + e * stride) % overall_n;
+      int ij = (combined_idx / stride) * (combined_idx % stride);
+      // Apply four step twiddles at end of first step
+      float2 twiddle = get_twiddle(ij, overall_n);
+      out[strided_device_idx + e * stride] = complex_mul(output, twiddle);
     }
   }
 };
+
+// Four Step FFT Second Step
+template <>
+METAL_FUNC void ReadWriter<float2, float2, /*step=*/1>::load_strided(
+    int stride,
+    int overall_n) {
+  // Silence compiler warnings
+  (void)stride;
+  (void)overall_n;
+  // Don't invert between steps
+  bool default_inv = inv;
+  inv = false;
+  load();
+  inv = default_inv;
+}
+
+template <>
+METAL_FUNC void ReadWriter<float2, float2, /*step=*/1>::write_strided(
+    int stride,
+    int overall_n) {
+  compute_strided_indices(stride, overall_n);
+  for (int e = 0; e < elems_per_thread; e++) {
+    float2 output = buf[strided_shared_idx + e];
+    out[strided_device_idx + e * stride] = pre_out(output, overall_n);
+  }
+}
 
 // For RFFT, we interleave batches of two real sequences into one complex one:
 //
@@ -499,5 +516,48 @@ METAL_FUNC void ReadWriter<float2, float>::write_padded(
       out[batch_idx + index] = output.x / length;
       out[batch_idx + index + next_out] = output.y / -length;
     }
+  }
+}
+
+// Four Step RFFT (First step is idential to Four Step FFT)
+template <>
+METAL_FUNC void
+ReadWriter<float2, float2, /*step=*/1, /*real=*/true>::load_strided(
+    int stride,
+    int overall_n) {
+  // Silence compiler warnings
+  (void)stride;
+  (void)overall_n;
+  // Don't invert between steps
+  bool default_inv = inv;
+  inv = false;
+  load();
+  inv = default_inv;
+}
+
+template <>
+METAL_FUNC void
+ReadWriter<float2, float2, /*step=*/1, /*real=*/true>::write_strided(
+    int stride,
+    int overall_n) {
+  int overall_n_over_2 = overall_n / 2 + 1;
+  int coalesce_width = grid.y;
+  int tg_idx = elem.y * grid.z + elem.z;
+  int outer_batch_size = stride / coalesce_width;
+
+  int strided_batch_idx = (elem.x % outer_batch_size) * coalesce_width +
+      overall_n_over_2 * (elem.x / outer_batch_size);
+  strided_device_idx = strided_batch_idx +
+      tg_idx / coalesce_width * elems_per_thread / 2 * stride +
+      tg_idx % coalesce_width;
+  strided_shared_idx = (tg_idx % coalesce_width) * n +
+      tg_idx / coalesce_width * elems_per_thread / 2;
+  for (int e = 0; e < elems_per_thread / 2; e++) {
+    float2 output = buf[strided_shared_idx + e];
+    out[strided_device_idx + e * stride] = pre_out(output, overall_n);
+  }
+
+  if (tg_idx == 0 && elem.x % outer_batch_size == 0) {
+    out[strided_batch_idx + overall_n / 2] = buf[n / 2];
   }
 }
