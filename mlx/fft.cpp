@@ -107,10 +107,10 @@ array fft_impl(
   }
 
   auto out_shape = in_shape;
-  // if (real) {
-  //   auto ax = valid_axes.back();
-  //   out_shape[ax] = inverse ? n.back() : out_shape[ax] / 2 + 1;
-  // }
+  if (real) {
+    auto ax = valid_axes.back();
+    out_shape[ax] = inverse ? n.back() : out_shape[ax] / 2 + 1;
+  }
 
   auto stream = to_stream(s);
 

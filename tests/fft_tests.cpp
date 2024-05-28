@@ -13,30 +13,28 @@ TEST_CASE("test fft basics") {
   int n = 8192;
 
   // int n = 13;
-  // int batch_size = 131072 * 1024 / n;
-  int batch_size = 1;
-  array x = arange(n);
-  x = tile(reshape(x, {1, n}), {batch_size, 1});
-  // x = x + array({0, 8192}, {2, 1});
-  // std::cout << "x " << x << std::endl;
-  // array x = random::normal({batch_size, n});
+  int batch_size = 131072 * 1024 / n;
+  // int batch_size = 2;
+  // array x = arange(n);
+  // x = tile(reshape(x, {1, n}), {batch_size, 1});
+  array x = random::normal({batch_size, n});
   // array x = random::normal({batch_size, n}) +
   //     complex64_t{0.0f, 1.0f} * random::normal({batch_size, n});
-  // x = astype(x, complex64);
+  x = astype(x, complex64);
+  // std::cout << "x " << x << std::endl;
   // set_default_device(Device::cpu);
 
   set_default_device(Device::gpu);
   array y = fft::rfft(x);
   std::cout << "y " << y << std::endl;
-  std::cout << "y " << y.shape(1) << std::endl;
-  std::cout << reshape(slice(y, {0, 0}, {1, 256}), {4, 4, 4, 4}) << std::endl;
-  // std::cout << "y " << transpose(reshape(y, {2, 32, 256}), {0, 2, 1}) <<
-  // std::endl; std::cout << "y " << reshape(y, {2, 128, 8, 8}) << std::endl;
-  // std::cout << "y " << reshape(y, {2, 128, 4, 4, 4}) << std::endl;
+  // std::cout << reshape(slice(y, {0, 0}, {1, 256}), {4, 4, 4, 4}) <<
+  // std::endl; std::cout << "y " << transpose(reshape(y, {2, 32, 256}), {0, 2,
+  // 1}) << std::endl; std::cout << "y " << reshape(y, {2, 128, 8, 8}) <<
+  // std::endl; std::cout << "y " << reshape(y, {2, 128, 4, 4, 4}) << std::endl;
   // std::cout << "y " << reshape(slice(y, {0, 1}, {1, 13}), {3, 4}) <<
   // std::endl; std::cout << "y " << reshape(y, {11, 13, 4, 7}) << std::endl;
 
-  // auto bench_fft = [&x]() { return fft::rfft(x); };
+  // auto bench_fft = [&x]() { return fft::fft(x); };
   // TIME(bench_fft);
 
   set_default_device(Device::cpu);

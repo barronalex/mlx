@@ -16,15 +16,15 @@ We implement specialized reading/writing for:
 
 Each with support for:
   - Contiguous reads
-  - Padded reads (for FFT Convs and Bluestein's)
-  - Strided reads (for 4 step and ND FFTs)
+  - Padded reads
+  - Strided reads (NYI for RFFT and IRFFT)
 */
 
 #define MAX_RADIX 13
 
 using namespace metal;
 
-template <typename in_T, typename out_T, bool four_step = false>
+template <typename in_T, typename out_T, int step = -1>
 struct ReadWriter {
   const device in_T* in;
   threadgroup float2* buf;
@@ -88,18 +88,22 @@ struct ReadWriter {
   METAL_FUNC void load() const {
     int batch_idx = elem.x * grid.y * n;
     short tg_idx = elem.y * grid.z + elem.z;
+    short max_index = grid.y * n - 2;
 
     // 2 complex64s = 128 bits
     constexpr int read_width = 2;
     for (short e = 0; e < (elems_per_thread / read_width); e++) {
       short index = read_width * tg_idx + read_width * threads_per_tg * e;
+      index = metal::min(index, max_index);
       // vectorized reads
       buf[index] = post_in(in[batch_idx + index]);
       buf[index + 1] = post_in(in[batch_idx + index + 1]);
     }
+    max_index += 1;
     if (elems_per_thread % 2 != 0) {
       short index = tg_idx +
           read_width * threads_per_tg * (elems_per_thread / read_width);
+      index = metal::min(index, max_index);
       buf[index] = post_in(in[batch_idx + index]);
     }
   }
@@ -107,17 +111,21 @@ struct ReadWriter {
   METAL_FUNC void write() const {
     int batch_idx = elem.x * grid.y * n;
     short tg_idx = elem.y * grid.z + elem.z;
+    short max_index = grid.y * n - 2;
 
     constexpr int read_width = 2;
     for (short e = 0; e < (elems_per_thread / read_width); e++) {
       short index = read_width * tg_idx + read_width * threads_per_tg * e;
+      index = metal::min(index, max_index);
       // vectorized reads
       out[batch_idx + index] = pre_out(buf[index]);
       out[batch_idx + index + 1] = pre_out(buf[index + 1]);
     }
+    max_index += 1;
     if (elems_per_thread % 2 != 0) {
       short index = tg_idx +
           read_width * threads_per_tg * (elems_per_thread / read_width);
+      index = metal::min(index, max_index);
       out[batch_idx + index] = pre_out(buf[index]);
     }
   }
@@ -178,8 +186,8 @@ struct ReadWriter {
         tg_idx / coalesce_width * elems_per_thread;
   }
 
-  METAL_FUNC void load_strided(int stride, int overall_n, bool first_step) {
-    if (first_step) {
+  METAL_FUNC void load_strided(int stride, int overall_n) {
+    if (step == 0) {
       compute_strided_indices(stride, overall_n);
       for (int e = 0; e < elems_per_thread; e++) {
         buf[strided_shared_idx + e] =
@@ -194,16 +202,16 @@ struct ReadWriter {
     }
   }
 
-  METAL_FUNC void write_strided(int stride, int overall_n, bool first_step) {
+  METAL_FUNC void write_strided(int stride, int overall_n) {
     // Don't recompute strided indices on first step
-    // where both input and output are strided
-    if (!first_step) {
+    // when they've already been computed for the load.
+    if (step == 1) {
       compute_strided_indices(stride, overall_n);
     }
     // TODO(alexbarron) genericise this beyond four step FFT
     for (int e = 0; e < elems_per_thread; e++) {
       float2 output = buf[strided_shared_idx + e];
-      if (first_step) {
+      if (step == 0) {
         // Apply four step twiddles after first step
         int combined_idx = (strided_device_idx + e * stride) % overall_n;
         int ij = (combined_idx / stride) * (combined_idx % stride);
@@ -354,69 +362,6 @@ METAL_FUNC void ReadWriter<float, float2>::write_padded(
   }
 }
 
-// RFFT four step only needs to be specialized for the last step
-template <>
-METAL_FUNC bool ReadWriter<float, float2, true>::out_of_bounds() const {
-  int grid_index = elem.x * grid.y + elem.y;
-  return grid_index >= batch_size;
-}
-
-template <>
-METAL_FUNC void ReadWriter<float, float2, true>::load_strided(
-    int stride,
-    int overall_n,
-    bool first_step) {
-  // Silence compiler warnings
-  (void)first_step;
-  (void)overall_n;
-  (void)stride;
-
-  // We need the corresponding elements in the RFFT algorithm (k, n/2 - k)
-  // to be in the same threadgroup so we have to permute the batches here.
-  // X_e = (Z[k] + Z*[n/2 - k])/2
-  // x x x x - - - - = = = = = = = = - - - - x x x x
-  int grid_index = elem.x * grid.y + elem.y;
-  int base_batch_index = grid_index / stride;
-  int inner_index = grid_index % stride;
-  int batch_idx = inner_index % 2 == 0 ? (inner_index / 2) * n
-                                       : overall_n - (inner_index + 1) * n;
-
-  auto in_complex = (const device float2*)in;
-  int fft_idx = elem.z;
-  int m = grid.z;
-  threadgroup float2* seq_buf = buf + elem.y * n;
-
-  for (int e = 0; e < elems_per_thread; e++) {
-    int index = fft_idx + e * m;
-    // seq_buf[index] = in_complex[batch_idx + index];
-    seq_buf[index] = batch_idx + index;
-  }
-}
-
-template <>
-METAL_FUNC void ReadWriter<float, float2, true>::write_strided(
-    int stride,
-    int overall_n,
-    bool first_step) {
-  // Silence compiler warnings
-  (void)first_step;
-
-  int batch_idx = elem.x * grid.y * n + elem.y * n;
-  int fft_idx = elem.z;
-  int m = grid.z;
-  threadgroup float2* seq_buf = buf + elem.y * n;
-  for (int e = 0; e < elems_per_thread; e++) {
-    int index = fft_idx + e * m;
-    out[batch_idx + index] = seq_buf[index];
-  }
-
-  // compute_strided_indices(stride, overall_n);
-  // for (int e = 0; e < elems_per_thread; e++) {
-  //   // Now it's time to unpack the RFFT
-  //   out[strided_device_idx + e * stride] = buf[strided_shared_idx + e];
-  // }
-}
-
 // For IRFFT, we do the opposite
 //
 // Z_k = X_k + j.Y_k
@@ -478,7 +423,7 @@ METAL_FUNC void ReadWriter<float2, float>::write() const {
   short fft_idx = elem.z;
 
   for (int e = 0; e < elems_per_thread; e++) {
-    int index = fft_idx + e * m;
+    int index = metal::min(fft_idx + e * m, n - 1);
     out[batch_idx + index] = seq_buf[index].x / n;
     out[batch_idx + index + next_out] = seq_buf[index].y / -n;
   }

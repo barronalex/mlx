@@ -50,61 +50,62 @@ struct FFTPlan {
   bool four_step = false;
   int n1 = 0;
   int n2 = 0;
-
-  int best_elems_per_thread() {
-    // Heuristic for selecting an efficient number
-    // of threads to use for a particular mixed-radix FFT.
-    std::vector<int> steps;
-    auto radices = supported_radices();
-    steps.insert(steps.end(), stockham.begin(), stockham.end());
-    steps.insert(steps.end(), rader.begin(), rader.end());
-    std::map<int, int> used_radices;
-    for (int i = 0; i < steps.size(); i++) {
-      int radix = radices[i % radices.size()];
-      if (steps[i] > 0) {
-        if (used_radices.find(radix) == used_radices.end()) {
-          used_radices[radix] = steps[i];
-        } else {
-          used_radices[radix] += steps[i];
-        }
-      }
-    }
-    int min_cost = INT_MAX;
-    int num_elems = 0;
-    // Compute the excess FTs computed for each possible
-    // value of `elems_per_thread` and pick the minimum.
-    for (const auto key_val : used_radices) {
-      int radix = key_val.first;
-      int n_threads = n / radix;
-      int extra_cost = 0;
-      for (const auto [other_radix, num_steps] : used_radices) {
-        int cost = ((radix + other_radix - 1) / other_radix) * n_threads;
-        extra_cost += (cost - n / other_radix) * num_steps;
-      }
-      num_elems = extra_cost < min_cost ? radix : num_elems;
-      min_cost = extra_cost < min_cost ? extra_cost : min_cost;
-    }
-    // Manual tuning for 7/11/13
-    if (used_radices.find(7) != used_radices.end() &&
-        (used_radices.find(11) != used_radices.end() ||
-         used_radices.find(13) != used_radices.end())) {
-      num_elems = 7;
-    } else if (
-        used_radices.find(11) != used_radices.end() &&
-        used_radices.find(13) != used_radices.end()) {
-      num_elems = 11;
-    }
-
-    // TODO(alexbarron) Some really weird stuff is going on
-    // for certain `elems_per_thread` on large composite n.
-    // Possibly a compiler issue?
-    num_elems = n == 3159 ? 13 : num_elems;
-    num_elems = n == 3645 ? 5 : num_elems;
-    num_elems = n == 3969 ? 7 : num_elems;
-
-    return num_elems;
-  }
 };
+
+int compute_elems_per_thread(FFTPlan plan) {
+  // Heuristic for selecting an efficient number
+  // of threads to use for a particular mixed-radix FFT.
+  auto n = plan.n;
+  std::vector<int> steps;
+  auto radices = supported_radices();
+  steps.insert(steps.end(), plan.stockham.begin(), plan.stockham.end());
+  steps.insert(steps.end(), plan.rader.begin(), plan.rader.end());
+  std::map<int, int> used_radices;
+  for (int i = 0; i < steps.size(); i++) {
+    int radix = radices[i % radices.size()];
+    if (steps[i] > 0) {
+      if (used_radices.find(radix) == used_radices.end()) {
+        used_radices[radix] = steps[i];
+      } else {
+        used_radices[radix] += steps[i];
+      }
+    }
+  }
+  int min_cost = INT_MAX;
+  int num_elems = 0;
+  // Compute the excess FTs computed for each possible
+  // value of `elems_per_thread` and pick the minimum.
+  for (const auto key_val : used_radices) {
+    int radix = key_val.first;
+    int n_threads = n / radix;
+    int extra_cost = 0;
+    for (const auto [other_radix, num_steps] : used_radices) {
+      int cost = ((radix + other_radix - 1) / other_radix) * n_threads;
+      extra_cost += (cost - n / other_radix) * num_steps;
+    }
+    num_elems = extra_cost < min_cost ? radix : num_elems;
+    min_cost = extra_cost < min_cost ? extra_cost : min_cost;
+  }
+  // Manual tuning for 7/11/13
+  if (used_radices.find(7) != used_radices.end() &&
+      (used_radices.find(11) != used_radices.end() ||
+       used_radices.find(13) != used_radices.end())) {
+    num_elems = 7;
+  } else if (
+      used_radices.find(11) != used_radices.end() &&
+      used_radices.find(13) != used_radices.end()) {
+    num_elems = 11;
+  }
+
+  // TODO(alexbarron) Some really weird stuff is going on
+  // for certain `elems_per_thread` on large composite n.
+  // Possibly a compiler issue?
+  num_elems = n == 3159 ? 13 : num_elems;
+  num_elems = n == 3645 ? 5 : num_elems;
+  num_elems = n == 3969 ? 7 : num_elems;
+
+  return num_elems;
+}
 
 struct FourStepParams {
   bool required = false;
@@ -184,8 +185,7 @@ FFTPlan plan_fft(int n) {
       // We only support a single Rader factor currently
       // TODO(alexbarron) investigate weirdness with large
       // Rader sizes -- possibly a compiler issue?
-      // if (plan.rader_n > 1 || n > MAX_RADER_FFT_SIZE) {
-      if (true) {
+      if (plan.rader_n > 1 || n > MAX_RADER_FFT_SIZE) {
         plan.four_step = n > MAX_BLUESTEIN_FFT_SIZE;
         plan.bluestein_n = next_fast_n(2 * n - 1);
         plan.stockham = plan_stockham_fft(plan.bluestein_n);
@@ -363,24 +363,11 @@ void four_step_fft(
   if (plan.bluestein_n == -1) {
     FourStepParams four_step_params = {
         /* required= */ true, /* first_step= */ true, plan.n1, plan.n2};
-    auto temp_shape = in.shape();
-    if (real) {
-      // For RFFT, we convert an even RFFT of size n to an FFT of size n/2
-      four_step_params.n2 /= 2;
-      temp_shape[axis] = in.shape(axis) / 2;
-    }
-    array temp(temp_shape, complex64, nullptr, {});
-    std::cout << "n1 n2 " << four_step_params.n1 << " " << four_step_params.n2
-              << std::endl;
-    // Nice trick here:
-    // For the N/2 RFFT algorithm we need to pack odd and even float32s into a
-    // single complex64. Since our input is contiguous we can just treat the
-    // float32 as complex64
-    fft_op(in, temp, axis, inverse, /*real=*/false, four_step_params, s);
+    array temp(in.shape(), complex64, nullptr, {});
+    fft_op(in, temp, axis, inverse, real, four_step_params, s);
     four_step_params.first_step = false;
     fft_op(temp, out, axis, inverse, real, four_step_params, s);
     copies.push_back(temp);
-    return;
   } else {
     int n = in.shape(axis);
     array w_k({n}, complex64, nullptr, {});
@@ -551,17 +538,15 @@ void fft_op(
     func_consts.push_back(make_int(&plan.rader[i], index));
     index += 1;
   }
-  int elems_per_thread = plan.best_elems_per_thread();
+  int elems_per_thread = compute_elems_per_thread(plan);
   func_consts.push_back(make_int(&elems_per_thread, 2));
 
   int rader_m = n / plan.rader_n;
   func_consts.push_back(make_int(&rader_m, 3));
 
   // The overall number of FFTs we're going to compute for this input
-  int total_batch_size = out.dtype() == float32 ||
-          (four_step_params.required && four_step_params.first_step)
-      ? out.size() / n
-      : in.size() / n;
+  int total_batch_size =
+      out.dtype() == float32 ? out.size() / n : in.size() / n;
   int threads_per_fft = (fft_size + elems_per_thread - 1) / elems_per_thread;
 
   // We batch among threadgroups for improved efficiency when n is small
@@ -585,14 +570,6 @@ void fft_op(
   }
   int out_buffer_size = out.size();
 
-  std::cout << "elems per thread " << elems_per_thread << std::endl;
-  std::cout << "batch_size " << batch_size << std::endl;
-  std::cout << "threadgroup_batch_size " << threadgroup_batch_size << std::endl;
-  std::cout << "threads per fft " << threads_per_fft << std::endl;
-  std::cout << "total_batch_size " << total_batch_size << std::endl;
-
-  std::cout << "n " << n << std::endl;
-
   auto& compute_encoder = d.get_command_encoder(s.index);
   auto in_type_str = real && !inverse ? "float" : "float2";
   auto out_type_str = real && inverse ? "float" : "float2";
@@ -603,10 +580,12 @@ void fft_op(
       kname << "bluestein_fft_mem_" << threadgroup_mem_size << "_"
             << in_type_str << "_" << out_type_str;
     } else if (plan.rader_n > 1) {
-      kname << "rader_fft_mem_" << threadgroup_mem_size;
-    } else if (four_step_params.required) {
-      kname << "four_step_mem_" << threadgroup_mem_size << "_" << in_type_str
+      kname << "rader_fft_mem_" << threadgroup_mem_size << "_" << in_type_str
             << "_" << out_type_str;
+    } else if (four_step_params.required) {
+      auto step = four_step_params.first_step ? "0" : "1";
+      kname << "four_step_mem_" << threadgroup_mem_size << "_" << in_type_str
+            << "_" << out_type_str << "_" << step;
     } else {
       kname << "fft_mem_" << threadgroup_mem_size << "_" << in_type_str << "_"
             << out_type_str;
@@ -650,7 +629,6 @@ void fft_op(
       compute_encoder->setBytes(&four_step_params.n1, sizeof(int), 2);
       compute_encoder->setBytes(&four_step_params.n2, sizeof(int), 3);
       compute_encoder->setBytes(&total_batch_size, sizeof(int), 4);
-      compute_encoder->setBytes(&four_step_params.first_step, sizeof(bool), 5);
     } else {
       compute_encoder->setBytes(&n, sizeof(int), 2);
       compute_encoder->setBytes(&total_batch_size, sizeof(int), 3);
@@ -683,8 +661,9 @@ void nd_fft_op(
     bool real,
     const Stream& s) {
   // Perform ND FFT on GPU as a series of 1D FFTs
-  array temp1(out.shape(), complex64, nullptr, {});
-  array temp2(out.shape(), complex64, nullptr, {});
+  auto temp_shape = inverse ? in.shape() : out.shape();
+  array temp1(temp_shape, complex64, nullptr, {});
+  array temp2(temp_shape, complex64, nullptr, {});
   std::vector<array> temp_arrs = {temp1, temp2};
   for (int i = axes.size() - 1; i >= 0; i--) {
     // Opposite order for fft vs ifft
