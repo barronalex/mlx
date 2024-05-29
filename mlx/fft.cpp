@@ -8,6 +8,8 @@
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
+#include <iostream>
+
 #define MAX_STOCKHAM_FFT_SIZE 4096
 #define MAX_BLUESTEIN_FFT_SIZE 2048
 

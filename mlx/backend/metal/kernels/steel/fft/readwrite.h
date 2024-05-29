@@ -519,7 +519,7 @@ METAL_FUNC void ReadWriter<float2, float>::write_padded(
   }
 }
 
-// Four Step RFFT (First step is idential to Four Step FFT)
+// Four Step RFFT
 template <>
 METAL_FUNC void
 ReadWriter<float2, float2, /*step=*/1, /*real=*/true>::load_strided(
@@ -554,10 +554,64 @@ ReadWriter<float2, float2, /*step=*/1, /*real=*/true>::write_strided(
       tg_idx / coalesce_width * elems_per_thread / 2;
   for (int e = 0; e < elems_per_thread / 2; e++) {
     float2 output = buf[strided_shared_idx + e];
-    out[strided_device_idx + e * stride] = pre_out(output, overall_n);
+    out[strided_device_idx + e * stride] = output;
   }
 
+  // Add on n/2 + 1 element
   if (tg_idx == 0 && elem.x % outer_batch_size == 0) {
     out[strided_batch_idx + overall_n / 2] = buf[n / 2];
+  }
+}
+
+// Four Step IRFFT
+template <>
+METAL_FUNC void
+ReadWriter<float2, float2, /*step=*/0, /*real=*/true>::load_strided(
+    int stride,
+    int overall_n) {
+  int overall_n_over_2 = overall_n / 2 + 1;
+  auto conj = float2(1, -1);
+
+  compute_strided_indices(stride, overall_n);
+  // Translate indices in terms of N - k
+  for (int e = 0; e < elems_per_thread; e++) {
+    int device_idx = strided_device_idx + e * stride;
+    int overall_batch = device_idx / overall_n;
+    int overall_index = device_idx % overall_n;
+    if (overall_index < overall_n_over_2) {
+      device_idx -= overall_batch * (overall_n - overall_n_over_2);
+      buf[strided_shared_idx + e] = in[device_idx] * conj;
+    } else {
+      int conj_idx = overall_n - overall_index;
+      device_idx = overall_batch * overall_n_over_2 + conj_idx;
+      buf[strided_shared_idx + e] = in[device_idx];
+    }
+  }
+}
+
+template <>
+METAL_FUNC void
+ReadWriter<float2, float, /*step=*/1, /*real=*/true>::load_strided(
+    int stride,
+    int overall_n) {
+  // Silence compiler warnings
+  (void)stride;
+  (void)overall_n;
+  bool default_inv = inv;
+  inv = false;
+  load();
+  inv = default_inv;
+}
+
+template <>
+METAL_FUNC void
+ReadWriter<float2, float, /*step=*/1, /*real=*/true>::write_strided(
+    int stride,
+    int overall_n) {
+  compute_strided_indices(stride, overall_n);
+
+  for (int e = 0; e < elems_per_thread; e++) {
+    out[strided_device_idx + e * stride] =
+        pre_out(buf[strided_shared_idx + e], overall_n).x;
   }
 }

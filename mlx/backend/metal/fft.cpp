@@ -171,7 +171,6 @@ FFTPlan plan_fft(int n) {
     // Rough heuristic for choosing faster powers of two when we can
     plan.n2 = n > 65536 ? 1024 : 64;
     plan.n1 = n / plan.n2;
-    // std::cout << "n1 n2 " << plan.n1 << " " << plan.n2 << std::endl;
     return plan;
   } else if (n > MAX_STOCKHAM_FFT_SIZE) {
     // Otherwise we use a multi-upload Bluestein's
@@ -364,13 +363,16 @@ void four_step_fft(
   if (plan.bluestein_n == -1) {
     FourStepParams four_step_params = {
         /* required= */ true, /* first_step= */ true, plan.n1, plan.n2};
-    array temp(in.shape(), complex64, nullptr, {});
+    auto temp_shape = (real && inverse) ? out.shape() : in.shape();
+    array temp(temp_shape, complex64, nullptr, {});
     fft_op(in, temp, axis, inverse, real, four_step_params, s);
     four_step_params.first_step = false;
     fft_op(temp, out, axis, inverse, real, four_step_params, s);
-    // std::cout << "out shape " << out.shape(1) << std::endl;
     copies.push_back(temp);
   } else {
+    // TODO(alexbarron) implement RFFT/IRFFT for large non powers of two
+    assert(!real);
+
     int n = in.shape(axis);
     array w_k({n}, complex64, nullptr, {});
     array w_q({plan.bluestein_n}, complex64, nullptr, {});
@@ -547,8 +549,11 @@ void fft_op(
   func_consts.push_back(make_int(&rader_m, 3));
 
   // The overall number of FFTs we're going to compute for this input
-  int total_batch_size =
-      out.dtype() == float32 ? out.size() / n : in.size() / n;
+  int size = out.dtype() == float32 ? out.size() : in.size();
+  if (real && inverse && four_step_params.required) {
+    size = out.size();
+  }
+  int total_batch_size = size / n;
   int threads_per_fft = (fft_size + elems_per_thread - 1) / elems_per_thread;
 
   // We batch among threadgroups for improved efficiency when n is small
@@ -560,6 +565,7 @@ void fft_op(
         std::max(threadgroup_batch_size, MIN_COALESCE_WIDTH);
   }
   int threadgroup_mem_size = next_power_of_2(threadgroup_batch_size * fft_size);
+  // FFTs up to 2^20 are currently supported
   assert(threadgroup_mem_size <= MAX_STOCKHAM_FFT_SIZE);
 
   // ceil divide
@@ -571,12 +577,6 @@ void fft_op(
     batch_size = (batch_size + 2 - 1) / 2;
   }
   int out_buffer_size = out.size();
-
-  // std::cout << "elems per thread " << elems_per_thread << std::endl;
-  // std::cout << " batch size " << batch_size << std::endl;
-  // std::cout << " total batch size " << total_batch_size << std::endl;
-  // std::cout << " threadgroup batch size " << threadgroup_batch_size <<
-  // std::endl;
 
   auto& compute_encoder = d.get_command_encoder(s.index);
   auto in_type_str = in.dtype() == float32 ? "float" : "float2";

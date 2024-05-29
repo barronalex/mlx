@@ -554,10 +554,12 @@ template <
   instantiate_bluestein(tg_mem_size, float2, float2) \
   instantiate_bluestein(tg_mem_size, float, float2) \
   instantiate_bluestein(tg_mem_size, float2, float) \
-  instantiate_four_step(tg_mem_size, float2, float2, 0, false) \
-  instantiate_four_step(tg_mem_size, float2, float2, 1, false) \
-  instantiate_four_step(tg_mem_size, float, float2, 0, true) \
-  instantiate_four_step(tg_mem_size, float2, float2, 1, true)
+  instantiate_four_step(tg_mem_size, float2, float2, 0, /*real=*/false) \
+  instantiate_four_step(tg_mem_size, float2, float2, 1, /*real=*/false) \
+  instantiate_four_step(tg_mem_size, float, float2, 0, /*real=*/true) \
+  instantiate_four_step(tg_mem_size, float2, float2, 1, /*real=*/true) \
+  instantiate_four_step(tg_mem_size, float2, float2, 0, /*real=*/true) \
+  instantiate_four_step(tg_mem_size, float2, float, 1, /*real=*/true)
 
 // It's substantially faster to statically define the
 // threadgroup memory size rather than using
