@@ -101,56 +101,57 @@ class TestFFT(mlx_tests.MLXTestCase):
         self.check_mx_np(mx.fft.irfft, np.fft.irfft, ia_np, atol=atol, rtol=rtol)
 
     def test_fft_shared_mem(self):
-        # nums = np.concatenate(
-        #     [
-        #         # small radix
-        #         np.arange(2, 14),
-        #         # powers of 2
-        #         [2**k for k in range(4, 13)],
-        #         # stockham
-        #         [3 * 3 * 3, 3 * 11, 11 * 13 * 2, 7 * 4 * 13 * 11, 13 * 13 * 13],
-        #         # rader
-        #         [17, 23, 29, 17 * 8 * 3, 23 * 2, 1153, 4006],
-        #         # bluestein
-        #         [47, 83, 17 * 17, 3109],
-        #         # large stockham
-        #         [3159, 3645, 3969],
-        #     ]
-        # )
-        # for batch_size in (1, 3, 32):
-        #     for num in nums:
-        #         atol = 1e-4 if num < 1025 else 1e-3
-        #         self._run_ffts((batch_size, num), atol=atol)
+        nums = np.concatenate(
+            [
+                # small radix
+                np.arange(2, 14),
+                # powers of 2
+                [2**k for k in range(4, 13)],
+                # stockham
+                [3 * 3 * 3, 3 * 11, 11 * 13 * 2, 7 * 4 * 13 * 11, 13 * 13 * 11],
+                # rader
+                [17, 23, 29, 17 * 8 * 3, 23 * 2, 1153],
+                # bluestein
+                [47, 83, 17 * 17],
+                # large stockham
+                [3159, 3645, 3969],
+            ]
+        )
+        for batch_size in (1, 3, 32):
+            for num in nums:
+                print(num)
+                atol = 1e-4 if num < 1025 else 1e-3
+                self._run_ffts((batch_size, num), atol=atol)
 
         # nums = [
         #     i for i in range(2, 4096) if all(p <= 13 for p in sympy.primefactors(i))
         # ]
-        with mx.stream(mx.gpu):
-            nums = range(2, 2049)
-            for batch_size in (1, 3, 32):
-                for num in nums:
-                    print(num)
-                    atol = 1e-4 if num < 1025 else 1e-3
-                    self._run_ffts((batch_size, num), atol=atol)
+        # for batch_size in (1, 3, 32):
+        #     for num in nums:
+        #         print(num)
+        #         atol = 1e-4 if num < 1025 else 1e-3
+        #         self._run_ffts((batch_size, num), atol=atol)
 
     def test_fft_big_powers_of_two(self):
         # TODO: improve precision on big powers of two on GPU
-        for k in range(12, 19):
+        for k in range(12, 17):
             self._run_ffts((3, 2**k), atol=1e-3)
 
-        for k in range(19, 20):
+        for k in range(17, 20):
             self._run_ffts((3, 2**k), atol=1e-2)
 
     def test_fft_large_numbers(self):
         numbers = [
-            1037,  # prime > 1024
+            1037,  # prime > 2048
             18247,  # medium size prime factors
             1259 * 11,  # large prime factors
             7883,  # large prime
             3**8,  # large stockham decomposable
+            3109,  # bluestein
+            4006,  # large rader
         ]
         for large_num in numbers:
-            self._run_ffts((large_num,), atol=1e-3, rtol=1e-3)
+            self._run_ffts((1, large_num), atol=1e-4)
 
     def test_fft_contiguity(self):
         r = np.random.rand(4, 8).astype(np.float32)

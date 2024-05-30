@@ -17,7 +17,7 @@ We implement specialized reading/writing for:
 Each with support for:
   - Contiguous reads
   - Padded reads
-  - Strided reads (NYI for RFFT and IRFFT)
+  - Strided reads
 */
 
 #define MAX_RADIX 13

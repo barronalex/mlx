@@ -53,56 +53,58 @@ struct FFTPlan {
 };
 
 int compute_elems_per_thread(FFTPlan plan) {
-  // Heuristic for selecting an efficient number
+  // Heuristics for selecting an efficient number
   // of threads to use for a particular mixed-radix FFT.
   auto n = plan.n;
+
   std::vector<int> steps;
   auto radices = supported_radices();
   steps.insert(steps.end(), plan.stockham.begin(), plan.stockham.end());
   steps.insert(steps.end(), plan.rader.begin(), plan.rader.end());
-  std::map<int, int> used_radices;
+  std::set<int> used_radices;
   for (int i = 0; i < steps.size(); i++) {
     int radix = radices[i % radices.size()];
     if (steps[i] > 0) {
-      if (used_radices.find(radix) == used_radices.end()) {
-        used_radices[radix] = steps[i];
-      } else {
-        used_radices[radix] += steps[i];
-      }
+      used_radices.insert(radix);
     }
   }
-  int min_cost = INT_MAX;
-  int num_elems = 0;
-  // Compute the excess FTs computed for each possible
-  // value of `elems_per_thread` and pick the minimum.
-  for (const auto key_val : used_radices) {
-    int radix = key_val.first;
-    int n_threads = n / radix;
-    int extra_cost = 0;
-    for (const auto [other_radix, num_steps] : used_radices) {
-      int cost = ((radix + other_radix - 1) / other_radix) * n_threads;
-      extra_cost += (cost - n / other_radix) * num_steps;
-    }
-    num_elems = extra_cost < min_cost ? radix : num_elems;
-    min_cost = extra_cost < min_cost ? extra_cost : min_cost;
-  }
+
   // Manual tuning for 7/11/13
   if (used_radices.find(7) != used_radices.end() &&
       (used_radices.find(11) != used_radices.end() ||
        used_radices.find(13) != used_radices.end())) {
-    num_elems = 7;
+    return 7;
   } else if (
       used_radices.find(11) != used_radices.end() &&
       used_radices.find(13) != used_radices.end()) {
-    num_elems = 11;
+    return 11;
   }
 
   // TODO(alexbarron) Some really weird stuff is going on
   // for certain `elems_per_thread` on large composite n.
   // Possibly a compiler issue?
-  num_elems = n == 3159 ? 13 : num_elems;
-  num_elems = n == 3645 ? 5 : num_elems;
-  num_elems = n == 3969 ? 7 : num_elems;
+  if (n == 3159)
+    return 13;
+  if (n == 3645)
+    return 5;
+  if (n == 3969)
+    return 7;
+
+  if (used_radices.size() == 1) {
+    return *(used_radices.begin());
+  }
+  if (used_radices.size() == 2) {
+    if (used_radices.find(11) != used_radices.end()) {
+      return std::accumulate(used_radices.begin(), used_radices.end(), 0) / 2;
+    }
+    std::vector<int> radix_vec(used_radices.begin(), used_radices.end());
+    return radix_vec[1];
+  }
+  if (used_radices.size() > 2) {
+    std::vector<int> radix_vec(used_radices.begin(), used_radices.end());
+    return radix_vec[1];
+  }
+  int num_elems = 0;
 
   return num_elems;
 }
@@ -122,6 +124,7 @@ void fft_op(
     bool inverse,
     bool real,
     const FourStepParams four_step_params,
+    bool inplace,
     const Stream& s);
 
 int next_fast_n(int n) {
@@ -260,7 +263,6 @@ void compute_bluestein_constants(
     return std::complex<float>(real, imag);
   };
 
-  // convert back to float now we've done the sincos
   std::vector<std::complex<float>> w_k_input(n, 0.0);
   std::transform(
       real_part_w_k.begin(),
@@ -365,14 +367,14 @@ void four_step_fft(
         /* required= */ true, /* first_step= */ true, plan.n1, plan.n2};
     auto temp_shape = (real && inverse) ? out.shape() : in.shape();
     array temp(temp_shape, complex64, nullptr, {});
-    fft_op(in, temp, axis, inverse, real, four_step_params, s);
+    fft_op(
+        in, temp, axis, inverse, real, four_step_params, /*inplace=*/false, s);
     four_step_params.first_step = false;
-    fft_op(temp, out, axis, inverse, real, four_step_params, s);
+    fft_op(
+        temp, out, axis, inverse, real, four_step_params, /*inplace=*/false, s);
     copies.push_back(temp);
   } else {
-    // TODO(alexbarron) implement RFFT/IRFFT for large non powers of two
-    assert(!real);
-
+    // TODO(alexbarron) implement IFFT/RFFT/IRFFT for large non powers of two
     int n = in.shape(axis);
     array w_k({n}, complex64, nullptr, {});
     array w_q({plan.bluestein_n}, complex64, nullptr, {});
@@ -395,19 +397,20 @@ void four_step_fft(
     auto padded_shape = out.shape();
     padded_shape[axis] = plan.bluestein_n;
     array temp1(padded_shape, complex64, nullptr, {});
-    pad(temp, array(complex64_t{0.0f, 0.0f}), temp1, {(int)axis}, {0}, s);
+    pad_gpu(temp, array(complex64_t{0.0f, 0.0f}), temp1, {(int)axis}, {0}, s);
 
     array temp2(padded_shape, complex64, nullptr, {});
     fft_op(
         temp1,
         temp2,
         axis,
-        /* inverse= */ false,
-        /* real= */ false,
+        /*inverse=*/false,
+        /*real=*/false,
         FourStepParams(),
+        /*inplace=*/false,
         s);
 
-    binary_op_gpu({temp2, w_q_broadcast}, temp1, "mul", s);
+    binary_op_gpu_inplace({temp2, w_q_broadcast}, temp1, "mul", s);
 
     fft_op(
         temp1,
@@ -416,6 +419,7 @@ void four_step_fft(
         /* inverse= */ true,
         /* real= */ false,
         FourStepParams(),
+        /*inplace=*/true,
         s);
 
     int offset = plan.bluestein_n - (2 * n - 1);
@@ -443,6 +447,7 @@ void fft_op(
     bool inverse,
     bool real,
     const FourStepParams four_step_params,
+    bool inplace,
     const Stream& s) {
   auto& d = metal::device(s.device);
 
@@ -501,12 +506,6 @@ void fft_op(
       }
     }
   }
-  // TODO: allow donation here
-  out.set_data(
-      allocator::malloc_or_wait(out.nbytes()),
-      in_contiguous.data_size(),
-      out_strides,
-      in_contiguous.flags());
 
   auto plan = plan_fft(n);
   if (plan.four_step) {
@@ -514,6 +513,15 @@ void fft_op(
     d.get_command_buffer(s.index)->addCompletedHandler(
         [copies](MTL::CommandBuffer*) mutable { copies.clear(); });
     return;
+  }
+
+  // TODO: allow donation here
+  if (!inplace) {
+    out.set_data(
+        allocator::malloc_or_wait(out.nbytes()),
+        in_contiguous.data_size(),
+        out_strides,
+        in_contiguous.flags());
   }
 
   auto radices = supported_radices();
@@ -658,8 +666,9 @@ void fft_op(
     size_t axis,
     bool inverse,
     bool real,
+    bool inplace,
     const Stream& s) {
-  fft_op(in, out, axis, inverse, real, FourStepParams(), s);
+  fft_op(in, out, axis, inverse, real, FourStepParams(), inplace, s);
 }
 
 void nd_fft_op(
@@ -675,8 +684,11 @@ void nd_fft_op(
   array temp2(temp_shape, complex64, nullptr, {});
   std::vector<array> temp_arrs = {temp1, temp2};
   for (int i = axes.size() - 1; i >= 0; i--) {
+    int reverse_index = axes.size() - i - 1;
+    // For 5D and above, we don't want to reallocate our two temporary arrays
+    bool inplace = reverse_index >= 3 && i != 0;
     // Opposite order for fft vs ifft
-    int index = inverse ? axes.size() - i - 1 : i;
+    int index = inverse ? reverse_index : i;
     size_t axis = axes[index];
     // Mirror np.fft.(i)rfftn and perform a real transform
     // only on the final axis.
@@ -684,7 +696,7 @@ void nd_fft_op(
     int step_shape = inverse ? out.shape(axis) : in.shape(axis);
     const array& in_arr = i == axes.size() - 1 ? in : temp_arrs[1 - i % 2];
     array& out_arr = i == 0 ? out : temp_arrs[i % 2];
-    fft_op(in_arr, out_arr, axis, inverse, step_real, s);
+    fft_op(in_arr, out_arr, axis, inverse, step_real, inplace, s);
   }
 
   std::vector<array> copies = {temp1, temp2};
@@ -700,7 +712,7 @@ void FFT::eval_gpu(const std::vector<array>& inputs, array& out) {
   if (axes_.size() > 1) {
     nd_fft_op(in, out, axes_, inverse_, real_, s);
   } else {
-    fft_op(in, out, axes_[0], inverse_, real_, s);
+    fft_op(in, out, axes_[0], inverse_, real_, /*inplace=*/false, s);
   }
 }
 

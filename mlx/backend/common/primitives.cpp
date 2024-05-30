@@ -180,27 +180,7 @@ void Ceil::eval(const std::vector<array>& inputs, array& out) {
 }
 
 void Concatenate::eval(const std::vector<array>& inputs, array& out) {
-  std::vector<int> sizes;
-  sizes.push_back(0);
-  for (auto& p : inputs) {
-    sizes.push_back(p.shape(axis_));
-  }
-  std::partial_sum(sizes.cbegin(), sizes.cend(), sizes.begin());
-
-  out.set_data(allocator::malloc_or_wait(out.nbytes()));
-
-  auto strides = out.strides();
-  auto flags = out.flags();
-  flags.row_contiguous = false;
-  flags.col_contiguous = false;
-  flags.contiguous = false;
-  for (int i = 0; i < inputs.size(); i++) {
-    array out_slice(inputs[i].shape(), out.dtype(), nullptr, {});
-    size_t data_offset = strides[axis_] * sizes[i];
-    out_slice.copy_shared_buffer(
-        out, strides, flags, out_slice.size(), data_offset);
-    copy_inplace(inputs[i], out_slice, CopyType::GeneralGeneral);
-  }
+  concatenate_op(inputs, out, axis_);
 }
 
 void Conjugate::eval(const std::vector<array>& inputs, array& out) {

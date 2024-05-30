@@ -15,22 +15,9 @@
 
 namespace mlx::core::fft {
 
-// Forward declarations
-array bluestein_fft(
-    const array& a,
-    int n,
-    int axis,
-    bool inverse,
-    StreamOrDevice s);
-
-array four_step_fft(
-    const array& a,
-    int n,
-    int axis,
-    bool inverse,
-    StreamOrDevice s);
-
-std::tuple<array, array, array> compute_raders_constants(int n);
+// forward declarations
+array gpu_rfft(const array& a, int n, int axis, StreamOrDevice s);
+array gpu_irfft(const array& a, int n, int axis, StreamOrDevice s);
 
 array fft_impl(
     const array& a,
@@ -216,161 +203,41 @@ array irfftn(const array& a, StreamOrDevice s /* = {} */) {
   return fft_impl(a, true, true, s);
 }
 
-array gpu_nd_fft(
-    const array& a,
-    std::vector<int> n,
-    const std::vector<size_t> axes,
-    bool real,
-    bool inverse,
-    std::vector<int> out_shape,
-    StreamOrDevice s) {
-  // Perform ND FFT on GPU as a series of 1D FFTs
-  auto out = a;
-  for (int i = axes.size() - 1; i >= 0; i--) {
-    // Opposite order for fft vs ifft
-    int index = inverse ? axes.size() - i - 1 : i;
-    int axis = axes[index];
-    // Mirror np.fft.(i)rfftn and perform a real transform
-    // only on the final axis.
-    bool step_real = (real && index == axes.size() - 1);
-    int step_shape = inverse ? out_shape[axis] : a.shape(axis);
-    out = fft_impl(out, {step_shape}, {axis}, step_real, inverse, Device::gpu);
-  }
-  return out;
-}
-
-array bluestein_fft(
-    const array& a,
-    int n,
-    int axis,
-    bool inverse,
-    StreamOrDevice s) {
-  // int bluestein_n = FFT::next_fast_n(2 * n - 1);
-  int bluestein_n = 256;
-  // Precompute twiddle factors in high precision for Bluestein's
-  auto blue_outputs = std::vector<array>();
-  // array::make_arrays(
-  //     {{bluestein_n}, {n}},
-  //     {{complex64, complex64}},
-  //     std::make_shared<BluesteinFFTSetup>(to_stream(Device::cpu), n),
-  //     {});
-  // If N is small enough, use the fused implementation
-  array w_q = blue_outputs[0];
-  array w_k = blue_outputs[1];
-  std::vector<size_t> axes;
-  axes.push_back(axis);
-  if (bluestein_n <= MAX_STOCKHAM_FFT_SIZE) {
-    return array(
-        a.shape(),
-        complex64,
-        std::make_shared<FFT>(to_stream(s), axes, inverse, false),
-        {a, w_q, w_k});
-  } else {
-    // Broadcast w_k and w_q to the appropriate shapes
-    std::vector<int> broadcast_shape(a.ndim(), 1);
-    broadcast_shape[axis] = a.shape(axis);
-    w_k = reshape(w_k, broadcast_shape);
-    broadcast_shape[axis] = bluestein_n;
-    w_q = reshape(w_q, broadcast_shape);
-
-    // Pad out to the bluestein n size
-    std::vector<std::pair<int, int>> pads;
-    for (int i = 0; i < a.ndim(); i++) {
-      if (axis == i) {
-        pads.push_back({0, bluestein_n - n});
-      } else {
-        pads.push_back({0, 0});
-      }
-    }
-
-    // Do the convolution via FFT
-    array out = pad(a * w_k, pads, array(0), s);
-    out = fft_impl(
-        out, {bluestein_n}, {axis}, /* real= */ false, /* inverse= */ false, s);
-    out = fft_impl(
-        out * w_q,
-        {bluestein_n},
-        {axis},
-        /* real= */ false,
-        /* inverse= */ true,
-        s);
-    int offset = bluestein_n - (2 * n - 1);
-
-    // Slice back into the original FFT size
-    std::vector<int> starts(a.ndim(), 0);
-    std::vector<int> ends(a.shape());
-    starts[axis] = -offset - n;
-    ends[axis] = -offset;
-    out = slice(out, starts, ends, s);
-
-    out = w_k * out;
-    return out;
-  }
-}
-
-// For n that doesn't fit into GPU shared memory, we use the 4 step FFT
-// algorithm.
-array four_step_fft(
-    const array& a,
-    int n,
-    int axis,
-    bool inverse,
-    StreamOrDevice s) {
-  array in = inverse ? conjugate(a) : a;
-
-  auto factors = prime_factors(n);
-  int max_factor = *std::max_element(factors.begin(), factors.end());
-  // Decompose the problem into two FFTs of size n1 and n2.
-  int n1 = 1;
-  int n2 = factors.back();
-  for (int i = 0; i < factors.size(); i++) {
-    int factor = factors[i];
-    if (n1 * factor == n) {
-      n2 = factor;
-      break;
-    } else if (n1 * factor > MAX_BLUESTEIN_FFT_SIZE) {
-      n2 = std::accumulate(
-          factors.begin() + i, factors.end(), 1, std::multiplies<int>());
-      break;
-    }
-    n1 *= factor;
-  }
-  if (n1 > MAX_BLUESTEIN_FFT_SIZE || n2 > MAX_BLUESTEIN_FFT_SIZE) {
-    // Prime factors are too large for the fused bluestein implementation
-    // so we fallback to doing a manual bluestein.
-    array out = bluestein_fft(in, n, axis, false, s);
-    return inverse ? conjugate(out) / n : out;
-  }
-  // (..., n) -> (..., n1, n2)
-  std::vector<int> four_step_shape(a.shape());
-  auto axis_it = four_step_shape.begin() + axis;
-  four_step_shape.erase(axis_it);
-  four_step_shape.insert(axis_it, n2);
-  four_step_shape.insert(axis_it, n1);
-
-  std::vector<int> twiddle_shape(four_step_shape.size(), 1);
-  twiddle_shape[axis] = n1;
-  twiddle_shape[axis + 1] = n2;
-
-  array ij =
-      expand_dims(arange(n1, s), 1, s) * expand_dims(arange(n2, s), 0, s);
-  ij = reshape(ij, twiddle_shape, s);
-
-  array x = reshape(in, four_step_shape, s);
-  array twiddles = exp(-2 * M_PI * ij * complex64_t{0.0f, 1.0f} / n, s);
-  array step_one =
-      fft_impl(x, {n1}, {axis}, /* real= */ false, /* inverse= */ false, s) *
-      twiddles;
-  array step_two = fft_impl(
-      swapaxes(step_one, axis, axis + 1, s),
-      {n2},
+array gpu_rfft(const array& a, int n, int axis, StreamOrDevice s) {
+  array out = fft_impl(
+      astype(a, complex64, s),
+      {n},
       {axis},
       /* real= */ false,
       /* inverse= */ false,
       s);
-  array out = reshape(step_two, a.shape(), s);
-  out = inverse ? conjugate(out) / n : out;
-  return out;
+  std::vector<int> starts(a.ndim(), 0);
+  std::vector<int> ends(a.shape());
+  ends[axis] = n / 2 + 1;
+  return slice(out, starts, ends, s);
+}
+
+array gpu_irfft(const array& a, int n, int axis, StreamOrDevice s) {
+  std::vector<int> starts(a.ndim(), 0);
+  std::vector<int> ends(a.shape());
+  std::vector<int> steps(a.ndim(), 1);
+  array in = a;
+  if (n != 2) {
+    starts[axis] = n % 2 == 0 ? -2 : -1;
+    ends[axis] = 0;
+    steps[axis] = -1;
+    array conj = conjugate(slice(a, starts, ends, steps, s), s);
+    in = concatenate({a, conj}, axis, s);
+  }
+  in = conjugate(in);
+  array out = fft_impl(
+      in,
+      {n},
+      {axis},
+      /* real= */ false,
+      /* inverse= */ false,
+      s);
+  return astype(out / n, float32, s);
 }
 
 } // namespace mlx::core::fft

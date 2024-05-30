@@ -54,4 +54,6 @@ void slice_op(
     std::vector<int>& start_indices,
     std::vector<int>& strides);
 
+void concatenate_op(const std::vector<array>& inputs, array out, int axis);
+
 } // namespace mlx::core

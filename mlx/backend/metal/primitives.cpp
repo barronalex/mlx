@@ -20,17 +20,14 @@ namespace mlx::core {
 
 constexpr int METAL_MAX_INDEX_ARRAYS = 10;
 
-void binary_op_gpu(
+void binary_op_gpu_inplace(
     const std::vector<array>& inputs,
     std::vector<array>& outputs,
     const std::string op,
     const Stream& s) {
-  assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
   auto bopt = get_binary_op_type(a, b);
-  set_binary_op_output_data(a, b, outputs[0], bopt, true);
-  set_binary_op_output_data(a, b, outputs[1], bopt, true);
 
   auto& out = outputs[0];
   if (out.size() == 0) {
@@ -125,21 +122,33 @@ void binary_op_gpu(
 void binary_op_gpu(
     const std::vector<array>& inputs,
     std::vector<array>& outputs,
-    const std::string op) {
-  auto& s = outputs[0].primitive().stream();
-  binary_op_gpu(inputs, outputs, op, s);
-}
-
-void binary_op_gpu(
-    const std::vector<array>& inputs,
-    array& out,
     const std::string op,
     const Stream& s) {
   assert(inputs.size() == 2);
   auto& a = inputs[0];
   auto& b = inputs[1];
   auto bopt = get_binary_op_type(a, b);
-  set_binary_op_output_data(a, b, out, bopt, true);
+  set_binary_op_output_data(a, b, outputs[0], bopt, true);
+  set_binary_op_output_data(a, b, outputs[1], bopt, true);
+  binary_op_gpu_inplace(inputs, outputs, op, s);
+}
+
+void binary_op_gpu(
+    const std::vector<array>& inputs,
+    std::vector<array>& outputs,
+    const std::string op) {
+  auto& s = outputs[0].primitive().stream();
+  binary_op_gpu(inputs, outputs, op, s);
+}
+
+void binary_op_gpu_inplace(
+    const std::vector<array>& inputs,
+    array& out,
+    const std::string op,
+    const Stream& s) {
+  auto& a = inputs[0];
+  auto& b = inputs[1];
+  auto bopt = get_binary_op_type(a, b);
   if (out.size() == 0) {
     return;
   }
@@ -228,12 +237,25 @@ void binary_op_gpu(
 void binary_op_gpu(
     const std::vector<array>& inputs,
     array& out,
+    const std::string op,
+    const Stream& s) {
+  assert(inputs.size() == 2);
+  auto& a = inputs[0];
+  auto& b = inputs[1];
+  auto bopt = get_binary_op_type(a, b);
+  set_binary_op_output_data(a, b, out, bopt, true);
+  binary_op_gpu_inplace(inputs, out, op, s);
+}
+
+void binary_op_gpu(
+    const std::vector<array>& inputs,
+    array& out,
     const std::string op) {
   auto& s = out.primitive().stream();
   binary_op_gpu(inputs, out, op, s);
 }
 
-void ternary_op_gpu(
+void ternary_op_gpu_inplace(
     const std::vector<array>& inputs,
     array& out,
     const std::string op,
@@ -243,7 +265,6 @@ void ternary_op_gpu(
   auto& b = inputs[1];
   auto& c = inputs[2];
   TernaryOpType topt = get_ternary_op_type(a, b, c);
-  set_ternary_op_output_data(a, b, c, out, topt, true /* donate_with_move */);
 
   if (out.size() == 0) {
     return;
@@ -322,34 +343,34 @@ void ternary_op_gpu(
 void ternary_op_gpu(
     const std::vector<array>& inputs,
     array& out,
+    const std::string op,
+    const Stream& s) {
+  auto& a = inputs[0];
+  auto& b = inputs[1];
+  auto& c = inputs[2];
+  TernaryOpType topt = get_ternary_op_type(a, b, c);
+  set_ternary_op_output_data(a, b, c, out, topt, true /* donate_with_move */);
+  ternary_op_gpu_inplace(inputs, out, op, s);
+}
+
+void ternary_op_gpu(
+    const std::vector<array>& inputs,
+    array& out,
     const std::string op) {
   auto& s = out.primitive().stream();
   ternary_op_gpu(inputs, out, op, s);
 }
 
-void unary_op_gpu(
+void unary_op_gpu_inplace(
     const std::vector<array>& inputs,
     array& out,
     const std::string op,
     const Stream& s) {
   auto& in = inputs[0];
-  bool contig = in.flags().contiguous;
-  if (contig) {
-    if (in.is_donatable() && in.itemsize() == out.itemsize()) {
-      out.move_shared_buffer(in);
-    } else {
-      out.set_data(
-          allocator::malloc_or_wait(in.data_size() * out.itemsize()),
-          in.data_size(),
-          in.strides(),
-          in.flags());
-    }
-  } else {
-    out.set_data(allocator::malloc_or_wait(out.nbytes()));
-  }
   if (in.size() == 0) {
     return;
   }
+  bool contig = in.flags().contiguous;
 
   auto& d = metal::device(s.device);
   std::string tname = type_to_name(in);
@@ -382,12 +403,35 @@ void unary_op_gpu(
 void unary_op_gpu(
     const std::vector<array>& inputs,
     array& out,
+    const std::string op,
+    const Stream& s) {
+  auto& in = inputs[0];
+  bool contig = in.flags().contiguous;
+  if (contig) {
+    if (in.is_donatable() && in.itemsize() == out.itemsize()) {
+      out.move_shared_buffer(in);
+    } else {
+      out.set_data(
+          allocator::malloc_or_wait(in.data_size() * out.itemsize()),
+          in.data_size(),
+          in.strides(),
+          in.flags());
+    }
+  } else {
+    out.set_data(allocator::malloc_or_wait(out.nbytes()));
+  }
+  unary_op_gpu_inplace(inputs, out, op, s);
+}
+
+void unary_op_gpu(
+    const std::vector<array>& inputs,
+    array& out,
     const std::string op) {
   auto& s = out.primitive().stream();
   unary_op_gpu(inputs, out, op, s);
 }
 
-void pad(
+void pad_gpu(
     const array& in,
     const array& val,
     array& out,
@@ -835,7 +879,7 @@ void Pad::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& in = inputs[0];
   auto& val = inputs[1];
 
-  pad(in, val, out, axes_, low_pad_size_, stream());
+  pad_gpu(in, val, out, axes_, low_pad_size_, stream());
 }
 
 void Power::eval_gpu(const std::vector<array>& inputs, array& out) {
