@@ -89,6 +89,8 @@ int compute_elems_per_thread(FFTPlan plan) {
     return 5;
   if (n == 3969)
     return 7;
+  if (n == 1982)
+    return 5;
 
   if (used_radices.size() == 1) {
     return *(used_radices.begin());
@@ -100,13 +102,9 @@ int compute_elems_per_thread(FFTPlan plan) {
     std::vector<int> radix_vec(used_radices.begin(), used_radices.end());
     return radix_vec[1];
   }
-  if (used_radices.size() > 2) {
-    std::vector<int> radix_vec(used_radices.begin(), used_radices.end());
-    return radix_vec[1];
-  }
-  int num_elems = 0;
-
-  return num_elems;
+  // In all other cases use the second smallest radix.
+  std::vector<int> radix_vec(used_radices.begin(), used_radices.end());
+  return radix_vec[1];
 }
 
 struct FourStepParams {
@@ -155,7 +153,6 @@ std::vector<int> plan_stockham_fft(int n) {
   throw std::runtime_error("Unplannable");
 }
 
-// Plan the sequence of radices
 FFTPlan plan_fft(int n) {
   auto radices = supported_radices();
   std::set<int> radices_set(radices.begin(), radices.end());
@@ -163,7 +160,6 @@ FFTPlan plan_fft(int n) {
   FFTPlan plan;
   plan.n = n;
   plan.rader = std::vector<int>(radices.size(), 0);
-  // A plan is a number of steps for each supported radix
   auto factors = prime_factors(n);
   int remaining_n = n;
 
@@ -192,6 +188,7 @@ FFTPlan plan_fft(int n) {
         plan.four_step = n > MAX_BLUESTEIN_FFT_SIZE;
         plan.bluestein_n = next_fast_n(2 * n - 1);
         plan.stockham = plan_stockham_fft(plan.bluestein_n);
+        plan.rader = std::vector<int>(radices.size(), 0);
         return plan;
       }
       // See if we can use Rader's algorithm to Stockham decompose n - 1
@@ -204,6 +201,7 @@ FFTPlan plan_fft(int n) {
           plan.four_step = n > MAX_BLUESTEIN_FFT_SIZE;
           plan.bluestein_n = next_fast_n(2 * n - 1);
           plan.stockham = plan_stockham_fft(plan.bluestein_n);
+          plan.rader = std::vector<int>(radices.size(), 0);
           return plan;
         }
       }
@@ -351,6 +349,130 @@ std::tuple<array, array, array> compute_raders_constants(
   return std::make_tuple(b_q_fft, g_q_arr, g_minus_q_arr);
 }
 
+void multi_upload_bluestein_fft(
+    const array& in,
+    array& out,
+    size_t axis,
+    bool inverse,
+    bool real,
+    FFTPlan& plan,
+    std::vector<array> copies,
+    const Stream& s) {
+  // TODO(alexbarron) Implement fused kernels for mutli upload bluestein's
+  // algorithm
+  int n = inverse ? out.shape(axis) : in.shape(axis);
+  array w_k({n}, complex64, nullptr, {});
+  array w_q({plan.bluestein_n}, complex64, nullptr, {});
+  compute_bluestein_constants(n, plan.bluestein_n, w_q, w_k);
+
+  // Broadcast w_q and w_k to the batch size
+  std::vector<size_t> b_strides(in.ndim(), 0);
+  b_strides[axis] = 1;
+  array w_k_broadcast({}, complex64, nullptr, {});
+  array w_q_broadcast({}, complex64, nullptr, {});
+  w_k_broadcast.copy_shared_buffer(w_k, b_strides, {}, w_k.data_size());
+  w_q_broadcast.copy_shared_buffer(w_q, b_strides, {}, w_q.data_size());
+
+  auto temp_shape = inverse ? out.shape() : in.shape();
+  array temp(temp_shape, complex64, nullptr, {});
+  array temp1(temp_shape, complex64, nullptr, {});
+
+  if (real && !inverse) {
+    // Convert float32->complex64
+    copy_gpu(in, temp, CopyType::General, s);
+  } else if (real && inverse) {
+    int back_offset = n % 2 == 0 ? 2 : 1;
+    auto slice_shape = in.shape();
+    slice_shape[axis] -= back_offset;
+    array slice_temp(slice_shape, complex64, nullptr, {});
+    array conj_temp(in.shape(), complex64, nullptr, {});
+    copies.push_back(slice_temp);
+    copies.push_back(conj_temp);
+
+    std::vector<int> rstarts(in.ndim(), 0);
+    std::vector<int> rstrides(in.ndim(), 1);
+    rstarts[axis] = in.shape(axis) - back_offset;
+    rstrides[axis] = -1;
+    unary_op_gpu({in}, conj_temp, "conj", s);
+    slice_gpu(in, slice_temp, rstarts, rstrides, s);
+    concatenate_gpu({conj_temp, slice_temp}, temp, (int)axis, s);
+  } else if (inverse) {
+    unary_op_gpu({in}, temp, "conj", s);
+  } else {
+    temp.copy_shared_buffer(in);
+  }
+
+  binary_op_gpu({temp, w_k_broadcast}, temp1, "mul", s);
+
+  std::vector<std::pair<int, int>> pads;
+  auto padded_shape = out.shape();
+  padded_shape[axis] = plan.bluestein_n;
+  array pad_temp(padded_shape, complex64, nullptr, {});
+  pad_gpu(temp1, array(complex64_t{0.0f, 0.0f}), pad_temp, {(int)axis}, {0}, s);
+
+  array pad_temp1(padded_shape, complex64, nullptr, {});
+  fft_op(
+      pad_temp,
+      pad_temp1,
+      axis,
+      /*inverse=*/false,
+      /*real=*/false,
+      FourStepParams(),
+      /*inplace=*/false,
+      s);
+
+  binary_op_gpu_inplace({pad_temp1, w_q_broadcast}, pad_temp, "mul", s);
+
+  fft_op(
+      pad_temp,
+      pad_temp1,
+      axis,
+      /* inverse= */ true,
+      /* real= */ false,
+      FourStepParams(),
+      /*inplace=*/true,
+      s);
+
+  int offset = plan.bluestein_n - (2 * n - 1);
+  std::vector<int> starts(in.ndim(), 0);
+  std::vector<int> strides(in.ndim(), 1);
+  starts[axis] = plan.bluestein_n - offset - n;
+  slice_gpu(pad_temp1, temp, starts, strides, s);
+
+  binary_op_gpu_inplace({temp, w_k_broadcast}, temp1, "mul", s);
+
+  if (real && !inverse) {
+    std::vector<int> rstarts(in.ndim(), 0);
+    std::vector<int> rstrides(in.ndim(), 1);
+    slice_gpu(temp1, out, rstarts, strides, s);
+  } else if (real && inverse) {
+    std::vector<size_t> b_strides(in.ndim(), 0);
+    auto inv_n = array({1.0f / n}, {1}, float32);
+    array temp_float(out.shape(), out.dtype(), nullptr, {});
+    copies.push_back(temp_float);
+    copies.push_back(inv_n);
+
+    copy_gpu(temp1, temp_float, CopyType::General, s);
+    binary_op_gpu({temp_float, inv_n}, out, "mul", s);
+  } else if (inverse) {
+    auto inv_n = array({1.0f / n}, {1}, complex64);
+    unary_op_gpu({temp1}, temp, "conj", s);
+    binary_op_gpu({temp, inv_n}, out, "mul", s);
+    copies.push_back(inv_n);
+  } else {
+    out.copy_shared_buffer(temp1);
+  }
+
+  copies.push_back(w_k);
+  copies.push_back(w_q);
+  copies.push_back(w_k_broadcast);
+  copies.push_back(w_q_broadcast);
+  copies.push_back(temp);
+  copies.push_back(temp1);
+  copies.push_back(pad_temp);
+  copies.push_back(pad_temp1);
+}
+
 void four_step_fft(
     const array& in,
     array& out,
@@ -363,6 +485,7 @@ void four_step_fft(
   auto& d = metal::device(s.device);
 
   if (plan.bluestein_n == -1) {
+    // Fast no transpose implementation for powers of 2.
     FourStepParams four_step_params = {
         /* required= */ true, /* first_step= */ true, plan.n1, plan.n2};
     auto temp_shape = (real && inverse) ? out.shape() : in.shape();
@@ -374,69 +497,7 @@ void four_step_fft(
         temp, out, axis, inverse, real, four_step_params, /*inplace=*/false, s);
     copies.push_back(temp);
   } else {
-    // TODO(alexbarron) implement IFFT/RFFT/IRFFT for large non powers of two
-    int n = in.shape(axis);
-    array w_k({n}, complex64, nullptr, {});
-    array w_q({plan.bluestein_n}, complex64, nullptr, {});
-    compute_bluestein_constants(n, plan.bluestein_n, w_q, w_k);
-
-    // Broadcast w_q and w_k to the batch size
-    std::vector<size_t> b_strides(in.ndim(), 0);
-    b_strides[axis] = 1;
-    array w_k_broadcast({}, complex64, nullptr, {});
-    array w_q_broadcast({}, complex64, nullptr, {});
-
-    w_k_broadcast.copy_shared_buffer(w_k, b_strides, {}, w_k.data_size());
-    w_q_broadcast.copy_shared_buffer(w_q, b_strides, {}, w_q.data_size());
-
-    array temp(out.shape(), complex64, nullptr, {});
-    copies.push_back(temp);
-    binary_op_gpu({in, w_k_broadcast}, temp, "mul", s);
-
-    std::vector<std::pair<int, int>> pads;
-    auto padded_shape = out.shape();
-    padded_shape[axis] = plan.bluestein_n;
-    array temp1(padded_shape, complex64, nullptr, {});
-    pad_gpu(temp, array(complex64_t{0.0f, 0.0f}), temp1, {(int)axis}, {0}, s);
-
-    array temp2(padded_shape, complex64, nullptr, {});
-    fft_op(
-        temp1,
-        temp2,
-        axis,
-        /*inverse=*/false,
-        /*real=*/false,
-        FourStepParams(),
-        /*inplace=*/false,
-        s);
-
-    binary_op_gpu_inplace({temp2, w_q_broadcast}, temp1, "mul", s);
-
-    fft_op(
-        temp1,
-        temp2,
-        axis,
-        /* inverse= */ true,
-        /* real= */ false,
-        FourStepParams(),
-        /*inplace=*/true,
-        s);
-
-    int offset = plan.bluestein_n - (2 * n - 1);
-    std::vector<int> starts(in.ndim(), 0);
-    std::vector<int> strides(in.ndim(), 1);
-    starts[axis] = plan.bluestein_n - offset - n;
-    slice_op(temp2, temp, starts, strides);
-
-    binary_op_gpu({temp, w_k_broadcast}, out, "mul", s);
-
-    copies.push_back(w_k);
-    copies.push_back(w_q);
-    copies.push_back(w_k_broadcast);
-    copies.push_back(w_q_broadcast);
-    copies.push_back(temp);
-    copies.push_back(temp1);
-    copies.push_back(temp2);
+    multi_upload_bluestein_fft(in, out, axis, inverse, real, plan, copies, s);
   }
 }
 

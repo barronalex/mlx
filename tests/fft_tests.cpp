@@ -10,25 +10,29 @@ using namespace mlx::core;
 
 TEST_CASE("test fft basics") {
   random::seed(7);
-  int n = 18427;
+  int n = 289;
 
   // int n = 13;
   // int batch_size = 131072 * 1024 / n;
-  int batch_size = 2;
+  int batch_size = 1;
   // array x = arange(n);
   // x = tile(reshape(x, {1, n}), {batch_size, 1});
   array x = random::normal({batch_size, n});
   // array x = random::normal({batch_size, n}) +
   //     complex64_t{0.0f, 1.0f} * random::normal({batch_size, n});
   // x = astype(x, complex64);
-  // std::cout << "x " << x << std::endl;
   // set_default_device(Device::cpu);
 
-  array y = fft::ifft(x);
-  // array z = fft::irfft(y);
+  // set_default_device(Device::cpu);
+  array y = fft::fft(x);
   std::cout << "y " << y << std::endl;
-  std::cout << "y " << y.shape(1) << std::endl;
-  // std::cout << "z " << z << std::endl;
+  array x1 = random::normal({batch_size, 263});
+  array z = fft::fft(x1);
+  // set_default_device(Device::gpu);
+  // array z = fft::irfft(y, n, 1);
+  // // std::cout << "y " << y << std::endl;
+  // // std::cout << "y " << y.shape(1) << std::endl;
+  std::cout << "z " << z << std::endl;
   // std::cout << reshape(slice(y, {0, 1}, {2, 4097}), {2, 8, 8, 8, 8}) <<
   // std::endl; std::endl; std::cout << "y " << transpose(reshape(y, {2, 32,
   // 256}), {0, 2, 1}) << std::endl; std::cout << "y " << reshape(y, {2, 128, 8,
@@ -40,11 +44,14 @@ TEST_CASE("test fft basics") {
   // TIME(bench_fft);
 
   set_default_device(Device::cpu);
-  y = fft::ifft(x);
-  // z = fft::irfft(y);
+  y = fft::fft(x);
   std::cout << "y " << y << std::endl;
-  std::cout << "y " << y.shape(1) << std::endl;
-  // std::cout << "z " << z << std::endl;
+  z = fft::fft(x1);
+  // z = fft::irfft(y, n, 1);
+  std::cout << "z " << z << std::endl;
+  // std::cout << "y " << y << std::endl;
+  // std::cout << "y " << y.shape(1) << std::endl;
+  // std::cout << slice(x, {0, 9214}, {1, 9215}) << std::endl;
   // z = fft::irfft(y, n, 1);
   // std::cout << "z " << z << std::endl;
   // y = fft::fft(x);

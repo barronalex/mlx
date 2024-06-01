@@ -147,7 +147,7 @@ struct ReadWriter {
 
     threadgroup float2* seq_buf = buf + elem.y * n;
     for (int e = 0; e < elems_per_thread; e++) {
-      int index = fft_idx + e * m;
+      int index = metal::min(fft_idx + e * m, n - 1);
       if (index < length) {
         float2 elem = post_in(in[batch_idx + index]);
         seq_buf[index] = complex_mul(elem, w_k[index]);
@@ -165,7 +165,7 @@ struct ReadWriter {
 
     threadgroup float2* seq_buf = buf + elem.y * n;
     for (int e = 0; e < elems_per_thread; e++) {
-      int index = fft_idx + e * m;
+      int index = metal::min(fft_idx + e * m, n - 1);
       if (index < length) {
         float2 elem = seq_buf[index + length - 1] * inv_factor;
         out[batch_idx + index] = pre_out(complex_mul(elem, w_k[index]), length);

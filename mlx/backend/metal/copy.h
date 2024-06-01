@@ -37,4 +37,17 @@ void copy_gpu_inplace(
     CopyType ctype,
     const Stream& s);
 
+void slice_gpu(
+    const array& in,
+    array& out,
+    std::vector<int> start_indices,
+    std::vector<int> strides,
+    const Stream& s);
+
+void concatenate_gpu(
+    const std::vector<array>& inputs,
+    array& out,
+    int axis,
+    const Stream& s);
+
 } // namespace mlx::core
